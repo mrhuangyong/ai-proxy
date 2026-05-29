@@ -7,6 +7,9 @@ pub static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .tcp_keepalive(Duration::from_secs(60))
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(2)
+        .gzip(true)
+        .deflate(true)
+        .brotli(true)
         .build()
         .unwrap_or_default()
 });
