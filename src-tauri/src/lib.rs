@@ -161,6 +161,28 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn set_dock_visibility(visible: bool) {
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::msg_send;
+    use std::ffi::CStr;
+
+    unsafe {
+        let ns_app_class = AnyClass::get(CStr::from_bytes_with_nul(b"NSApplication\0").unwrap())
+            .expect("NSApplication not found");
+        let ns_app: *mut AnyObject = msg_send![ns_app_class, sharedApplication];
+        let policy: i64 = if visible { 0 } else { 1 }; // 0 = Regular, 1 = Accessory
+        let _: () = msg_send![ns_app, setActivationPolicy: policy];
+
+        if visible {
+            // Restore the application icon to the bundle default
+            let _: () = msg_send![ns_app, setApplicationIconImage: std::ptr::null_mut::<AnyObject>()];
+            // Ensure the app is properly activated
+            let _: () = msg_send![ns_app, activateIgnoringOtherApps: 1i8];
+        }
+    }
+}
+
 fn should_show_main_window_for_run_event(event: &tauri::RunEvent) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -265,6 +287,8 @@ pub fn run() {
                     } = event
                     {
                         let app = tray.app_handle();
+                        #[cfg(target_os = "macos")]
+                        set_dock_visibility(true);
                         show_main_window(app);
                     }
                 })
@@ -277,6 +301,8 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                #[cfg(target_os = "macos")]
+                set_dock_visibility(false);
             }
         })
         .build(tauri::generate_context!())
