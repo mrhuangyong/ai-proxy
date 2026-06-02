@@ -563,7 +563,7 @@ async fn handle_proxy(
             let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(15));
             heartbeat_interval.tick().await; // skip first immediate tick
 
-            let upstream_idle_timeout = std::time::Duration::from_secs(180);
+            let base_idle_timeout = std::time::Duration::from_secs(600);
             let mut upstream_idle = tokio::time::Instant::now();
             let mut chunk_count: u64 = 0;
 
@@ -596,11 +596,18 @@ async fn handle_proxy(
                         }
                     }
                     _ = heartbeat_interval.tick() => {
-                        // Check upstream idle timeout
-                        if upstream_idle.elapsed() > upstream_idle_timeout {
+                        let idle_elapsed = upstream_idle.elapsed();
+                        // Adaptive: streams that already received data get 2x timeout
+                        // to tolerate long reasoning pauses from models like mimo-v2.5-pro
+                        let effective_timeout = if chunk_count > 0 {
+                            base_idle_timeout.saturating_mul(2)
+                        } else {
+                            base_idle_timeout
+                        };
+                        if idle_elapsed > effective_timeout {
                             error!(
                                 "Upstream stall detected: no data for {}s ({} chunks received, {}s total)",
-                                upstream_idle.elapsed().as_secs(),
+                                idle_elapsed.as_secs(),
                                 chunk_count,
                                 start.elapsed().as_secs()
                             );
