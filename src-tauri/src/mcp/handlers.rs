@@ -4,8 +4,10 @@ use uuid::Uuid;
 use chrono::Utc;
 
 use crate::db::get_pool;
+use crate::apps::types::AppType;
 use crate::server::api::{ok, err_json, ApiError, ApiResponse};
 use super::types::*;
+use super::sync;
 
 pub async fn list_servers() -> Json<ApiResponse<Vec<McpServerWithBindings>>> {
     let pool = get_pool().await;
@@ -229,15 +231,24 @@ pub async fn update_bindings(
 
 pub async fn import_from_app(
     Path(app_type_str): Path<String>,
-) -> Result<Json<ApiResponse<super::types::ImportResult>>, Json<ApiError>> {
-    // Delegate to sync module
-    let _ = app_type_str;
-    Ok(ok(super::types::ImportResult { imported: 0, skipped: 0 }))
+) -> Result<Json<ApiResponse<ImportResult>>, Json<ApiError>> {
+    let app_type = AppType::from_str(&app_type_str)
+        .ok_or_else(|| err_json(format!("Unknown app type: {}", app_type_str)))?;
+
+    let result = sync::import_from_app(&app_type).await
+        .map_err(|e| err_json(e))?;
+
+    Ok(ok(result))
 }
 
 pub async fn apply_to_app(
     Path(app_type_str): Path<String>,
-) -> Result<Json<ApiResponse<super::types::ApplyResult>>, Json<ApiError>> {
-    let _ = app_type_str;
-    Ok(ok(super::types::ApplyResult { applied: 0 }))
+) -> Result<Json<ApiResponse<ApplyResult>>, Json<ApiError>> {
+    let app_type = AppType::from_str(&app_type_str)
+        .ok_or_else(|| err_json(format!("Unknown app type: {}", app_type_str)))?;
+
+    let result = sync::apply_to_app(&app_type).await
+        .map_err(|e| err_json(e))?;
+
+    Ok(ok(result))
 }
