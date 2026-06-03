@@ -127,6 +127,8 @@
           <n-space>
             <n-checkbox value="claude_cli" label="Claude CLI" />
             <n-checkbox value="claude_desktop" label="Claude Desktop" />
+            <n-checkbox value="codex_cli" label="Codex CLI" />
+            <n-checkbox value="codex_desktop" label="Codex Desktop" />
           </n-space>
         </n-checkbox-group>
       </n-form>
@@ -149,6 +151,8 @@
           <n-space vertical>
             <n-checkbox value="claude_cli" label="Claude CLI" />
             <n-checkbox value="claude_desktop" label="Claude Desktop" />
+            <n-checkbox value="codex_cli" label="Codex CLI" />
+            <n-checkbox value="codex_desktop" label="Codex Desktop" />
           </n-space>
         </n-checkbox-group>
       </n-space>
@@ -206,11 +210,15 @@ const transportColorMap: Record<string, string> = {
 const appNameMap: Record<string, string> = {
   claude_cli: 'Claude CLI',
   claude_desktop: 'Claude Desktop',
+  codex_cli: 'Codex CLI',
+  codex_desktop: 'Codex Desktop',
 }
 
 const importOptions = [
   { label: 'Claude CLI', key: 'claude_cli' },
   { label: 'Claude Desktop', key: 'claude_desktop' },
+  { label: 'Codex CLI', key: 'codex_cli' },
+  { label: 'Codex Desktop', key: 'codex_desktop' },
 ]
 
 const columns = [
