@@ -13,6 +13,9 @@
                 </template>
               </n-button>
             </n-dropdown>
+            <n-button @click="openApplyModal">
+              应用配置
+            </n-button>
             <n-button type="primary" @click="openCreateModal">
               添加 MCP
             </n-button>
