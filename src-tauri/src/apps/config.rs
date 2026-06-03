@@ -196,7 +196,7 @@ pub async fn write_claude_cli_config(
         );
         if !api_key.is_empty() {
             env_obj.insert(
-                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                "ANTHROPIC_API_KEY".to_string(),
                 serde_json::Value::String(api_key.to_string()),
             );
         }
