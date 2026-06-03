@@ -1,6 +1,7 @@
 use crate::server::handlers;
 use crate::server::api;
 use crate::server::middleware::auth_middleware;
+use crate::mcp;
 use axum::Router;
 use axum::routing::{post, get};
 use axum::middleware;
@@ -23,6 +24,7 @@ pub fn create_router() -> Router {
         .merge(proxy_routes)
         .route("/health", get(health_check))
         .nest("/api", api::api_routes())
+        .nest("/api/mcp", mcp::mcp_routes())
 }
 
 async fn health_check() -> &'static str {

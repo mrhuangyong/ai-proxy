@@ -86,6 +86,7 @@ const menuOptions = [
   { label: '仪表盘', key: '/', icon: renderIcon(HomeOutline) },
   { label: '供应商', key: '/providers', icon: renderIcon(ServerOutline) },
   { label: '应用管理', key: '/apps', icon: renderIcon(AppsOutline) },
+  { label: 'MCP 管理', key: '/mcp', icon: renderIcon(ServerOutline) },
   { label: '请求日志', key: '/logs', icon: renderIcon(DocumentTextOutline) },
   { label: '用量统计', key: '/statistics', icon: renderIcon(BarChartOutline) },
   { label: '运行日志', key: '/runtime-logs', icon: renderIcon(TerminalOutline) },

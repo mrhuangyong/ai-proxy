@@ -123,6 +123,20 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 010: add endpoint_path column");
     }
 
+    // Migration 011: MCP Server management tables
+    let has_mcp_servers: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='mcp_servers'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_mcp_servers {
+        let migration11 = include_str!("../../migrations/011_create_mcp_tables.sql");
+        sqlx::query(migration11).execute(pool).await?;
+        info!("Applied migration 011: MCP Server management tables");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

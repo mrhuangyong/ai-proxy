@@ -10,6 +10,7 @@ mod usage;
 mod logging;
 mod server;
 mod apps;
+mod mcp;
 mod update;
 mod update_timer;
 
