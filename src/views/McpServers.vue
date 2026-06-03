@@ -62,7 +62,13 @@
             <n-input v-model:value="form.command" placeholder="例如: npx" :input-props="{ autocapitalize: 'off' }" />
           </n-form-item>
           <n-form-item label="Args">
-            <n-input v-model:value="form.args" placeholder="例如: -y @modelcontextprotocol/server-filesystem /tmp" :input-props="{ autocapitalize: 'off' }" />
+            <n-input
+              v-model:value="form.args"
+              type="textarea"
+              placeholder="每行一个参数，例如:&#10;-y&#10;@modelcontextprotocol/server-filesystem&#10;/tmp"
+              :rows="3"
+              :input-props="{ autocapitalize: 'off' }"
+            />
           </n-form-item>
         </template>
 
@@ -289,6 +295,24 @@ function removeEnvPair(index: number) {
   form.value.envPairs = form.value.envPairs.filter((_, i) => i !== index)
 }
 
+function parseArgsToText(argsJson: string | null): string {
+  if (!argsJson) return ''
+  try {
+    const arr = JSON.parse(argsJson) as string[]
+    return arr.join('\n')
+  } catch {
+    return argsJson
+  }
+}
+
+function buildArgsJson(): string | null {
+  const lines = form.value.args
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 0)
+  return lines.length > 0 ? JSON.stringify(lines) : null
+}
+
 function parseEnvFromJson(envJson: string | null): EnvPair[] {
   if (!envJson) return []
   try {
@@ -332,7 +356,7 @@ function openEditModal(row: McpServerWithBindings) {
     name: row.name,
     transport_type: row.transport_type,
     command: row.command || '',
-    args: row.args || '',
+    args: parseArgsToText(row.args),
     url: row.url || '',
     headers: row.headers || '',
     envPairs: parseEnvFromJson(row.env),
@@ -384,7 +408,7 @@ async function handleSubmit() {
       }
       if (form.value.transport_type === 'stdio') {
         updateBody.command = form.value.command.trim()
-        updateBody.args = form.value.args.trim() || null
+        updateBody.args = buildArgsJson()
         updateBody.url = null
         updateBody.headers = null
       } else {
@@ -413,7 +437,7 @@ async function handleSubmit() {
       }
       if (form.value.transport_type === 'stdio') {
         createBody.command = form.value.command.trim()
-        createBody.args = form.value.args.trim() || null
+        createBody.args = buildArgsJson()
       } else {
         createBody.url = form.value.url.trim()
         createBody.headers = headersJson
