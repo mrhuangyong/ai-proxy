@@ -142,7 +142,7 @@ jobs:
   release:
     name: Publish Release Assets
     if: startsWith(github.ref, 'refs/tags/v') || needs.bump.outputs.version != ''
-    needs: build
+    needs: [build, bump]
     runs-on: ubuntu-latest
 
     steps:
@@ -159,7 +159,7 @@ jobs:
       - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.bump.outputs.version != '' && format('v{0}', needs.bump.outputs.version) || '' }}
+          tag_name: ${{ needs.bump.outputs.version && format('v{0}', needs.bump.outputs.version) || github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: false
           files: |
