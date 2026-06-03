@@ -6,7 +6,7 @@ use uuid::Uuid;
 use chrono::Utc;
 
 use crate::apps::types::AppType;
-use crate::apps::config::{claude_desktop_config_path, claude_cli_config_path, atomic_write};
+use crate::apps::config::{claude_desktop_config_path, atomic_write};
 use crate::db::get_pool;
 use super::types::*;
 
@@ -24,7 +24,10 @@ struct McpServerEntry {
 fn config_path_for(app_type: &AppType) -> Option<PathBuf> {
     match app_type {
         AppType::ClaudeDesktop => Some(claude_desktop_config_path()),
-        AppType::ClaudeCli => Some(claude_cli_config_path()),
+        AppType::ClaudeCli => {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+            Some(home.join(".claude.json"))
+        }
         _ => None,
     }
 }
