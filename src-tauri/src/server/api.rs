@@ -341,16 +341,26 @@ async fn get_usage(
     Query(query): Query<UsageQuery>,
 ) -> Result<Json<ApiResponse<UsageSummary>>, Json<ApiError>> {
     let pool = get_pool().await;
-    let rows: Vec<(String, String, i64, i64, i64, i64, i64)> = sqlx::query_as(
-        "SELECT model, provider_name, \
+    let (sql, param): (&str, String) = if query.days == 1 {
+        ("SELECT model, provider_name, \
+         SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), COUNT(*), SUM(cached_tokens) \
+         FROM request_logs \
+         WHERE date(created_at) = date('now') AND status_code = 200 \
+         GROUP BY model, provider_name \
+         ORDER BY SUM(total_tokens) DESC", String::new())
+    } else {
+        ("SELECT model, provider_name, \
          SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), COUNT(*), SUM(cached_tokens) \
          FROM request_logs \
          WHERE created_at >= datetime('now', ? || ' days') AND status_code = 200 \
          GROUP BY model, provider_name \
-         ORDER BY SUM(total_tokens) DESC",
-    )
-    .bind(format!("-{}", query.days))
-    .fetch_all(pool).await.map_err(|e| err_json(e.to_string()))?;
+         ORDER BY SUM(total_tokens) DESC", format!("-{}", query.days))
+    };
+    let rows: Vec<(String, String, i64, i64, i64, i64, i64)> = if query.days == 1 {
+        sqlx::query_as(sql).fetch_all(pool).await.map_err(|e| err_json(e.to_string()))?
+    } else {
+        sqlx::query_as(sql).bind(&param).fetch_all(pool).await.map_err(|e| err_json(e.to_string()))?
+    };
 
     let pricing = PricingTable::default();
     let mut total_cost = 0.0;

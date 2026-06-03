@@ -13,6 +13,7 @@ pub fn skill_routes() -> Router {
         .route("/discover", routing::post(handlers::discover))
         .route("/", routing::get(handlers::list_skills).post(handlers::create_skill_handler))
         .route("/:id", routing::get(handlers::get_skill).delete(handlers::delete_skill_handler))
+        .route("/:id/linked", routing::get(handlers::get_linked_skills))
         .route("/:id/skill-md", routing::put(handlers::update_skill_md))
         .route("/install", routing::post(handlers::install_skill))
         .route("/uninstall", routing::post(handlers::uninstall_skill))

@@ -169,14 +169,20 @@
       negative-text="取消"
       :loading="editMdLoading"
       @positive-click="handleSaveMd"
-      style="width: 680px"
+      :style="editMdFullscreen ? 'width: 95vw; height: 90vh' : 'width: 680px'"
     >
+      <template #header-extra>
+        <n-button quaternary size="small" @click="editMdFullscreen = !editMdFullscreen">
+          <template #icon>
+            <n-icon><contract-outline v-if="editMdFullscreen" /><expand-outline v-else /></n-icon>
+          </template>
+        </n-button>
+      </template>
       <n-spin :show="editMdContentLoaded">
-        <n-input
-          v-model:value="editMdContent"
-          type="textarea"
-          placeholder="SKILL.md 内容"
-          :rows="16"
+        <codemirror
+          v-model="editMdContent"
+          :style="{ height: editMdFullscreen ? 'calc(90vh - 140px)' : '480px' }"
+          :extensions="mdEditorExtensions"
         />
       </n-spin>
     </n-modal>
@@ -191,9 +197,16 @@ import {
   NButton,
   NSpace,
   NTooltip,
+  NIcon,
   useMessage,
+  useDialog,
 } from 'naive-ui'
 import { api } from '../api'
+import { Codemirror } from 'vue-codemirror'
+import { basicSetup } from 'codemirror'
+import { markdown } from '@codemirror/lang-markdown'
+import { oneDark } from '@codemirror/theme-one-dark'
+import { ExpandOutline, ContractOutline } from '@vicons/ionicons5'
 import type {
   SkillSourceWithCount,
   Skill,
@@ -204,6 +217,8 @@ import type {
 } from '../types'
 
 const message = useMessage()
+const dialog = useDialog()
+const mdEditorExtensions = [basicSetup, markdown(), oneDark]
 const loading = ref(false)
 const scanLoading = ref(false)
 const discoverLoading = ref(false)
@@ -243,6 +258,7 @@ const editMdLoading = ref(false)
 const editMdContentLoaded = ref(false)
 const editMdSkill = ref<Skill | null>(null)
 const editMdContent = ref('')
+const editMdFullscreen = ref(false)
 
 // Dropdown options for install button
 const installOptions = [
@@ -333,6 +349,7 @@ const columns = [
     title: '操作',
     key: 'actions',
     width: 280,
+    align: 'center',
     fixed: 'right' as const,
     render: (row: Skill) => {
       const source = sources.value.find((s) => s.id === row.source_id)
@@ -376,21 +393,17 @@ const columns = [
             }
           )
         )
-      } else if (!isGlobal) {
+      } else {
         buttons.push(
           h(
-            NPopconfirm,
-            { onPositiveClick: () => handleDeleteSkill(row.id) },
-            {
-              trigger: () =>
-                h(NButton, { size: 'small', quaternary: true, type: 'error' }, () => '删除'),
-              default: () => '确认删除此技能？',
-            }
+            NButton,
+            { size: 'small', quaternary: true, type: 'error', onClick: () => handleDeleteWithCheck(row) },
+            () => '删除'
           )
         )
       }
 
-      return h(NSpace, { size: 4 }, () => buttons)
+      return h(NSpace, { size: 4, justify: 'center' }, () => buttons)
     },
   },
 ]
@@ -633,10 +646,60 @@ async function handleUninstall(skillId: string) {
 
 // ---- Delete Skill ----
 
-async function handleDeleteSkill(skillId: string) {
+async function handleDeleteWithCheck(skill: Skill) {
   try {
-    await api(`/api/skills/${skillId}`, { method: 'DELETE' })
-    message.success('技能已删除')
+    // Query linked skills in other sources
+    const linked = await api<Skill[]>(`/api/skills/${skill.id}/linked`)
+
+    if (linked && linked.length > 0) {
+      // Build warning message with linked sources
+      const linkedNames = linked.map(l => {
+        const src = sources.value.find(s => s.id === l.source_id)
+        return src ? `${src.name}` : l.skill_path
+      }).join('、')
+
+      dialog.warning({
+        title: '删除技能',
+        content: `该技能已被链接到以下目录：${linkedNames}。删除后将同步移除这些符号链接。确认删除？`,
+        positiveText: '确认删除',
+        negativeText: '取消',
+        onPositiveClick: async () => {
+          await doDelete(skill.id)
+        },
+      })
+    } else {
+      dialog.warning({
+        title: '删除技能',
+        content: `确认删除技能「${skill.name}」？此操作不可恢复。`,
+        positiveText: '确认删除',
+        negativeText: '取消',
+        onPositiveClick: async () => {
+          await doDelete(skill.id)
+        },
+      })
+    }
+  } catch {
+    // If linked query fails, fallback to simple confirm
+    dialog.warning({
+      title: '删除技能',
+      content: `确认删除技能「${skill.name}」？此操作不可恢复。`,
+      positiveText: '确认删除',
+      negativeText: '取消',
+      onPositiveClick: async () => {
+        await doDelete(skill.id)
+      },
+    })
+  }
+}
+
+async function doDelete(skillId: string) {
+  try {
+    const result = await api<string[]>(`/api/skills/${skillId}`, { method: 'DELETE' })
+    if (result && result.length > 0) {
+      message.success(`技能已删除，同步清理了 ${result.length} 个关联链接`)
+    } else {
+      message.success('技能已删除')
+    }
     await fetchData()
   } catch (err) {
     message.error(`删除失败: ${err}`)

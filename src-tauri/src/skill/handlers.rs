@@ -220,14 +220,24 @@ pub async fn update_skill_md(
     Ok(ok(()))
 }
 
-pub async fn delete_skill_handler(
+pub async fn get_linked_skills(
     Path(id): Path<String>,
-) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
+) -> Result<Json<ApiResponse<Vec<Skill>>>, Json<ApiError>> {
     let pool = get_pool().await;
-    manager::delete_skill(pool, &id)
+    let linked = manager::find_linked_skills(pool, &id)
         .await
         .map_err(|e| err_json(e))?;
-    Ok(ok(()))
+    Ok(ok(linked))
+}
+
+pub async fn delete_skill_handler(
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<String>>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let _cleanup_log = manager::delete_skill(pool, &id)
+        .await
+        .map_err(|e| err_json(e))?;
+    Ok(ok(_cleanup_log))
 }
 
 pub async fn create_skill_handler(

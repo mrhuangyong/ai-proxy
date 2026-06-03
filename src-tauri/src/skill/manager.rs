@@ -239,6 +239,32 @@ pub async fn uninstall_skill(pool: &SqlitePool, skill_id: &str) -> Result<String
     }
 }
 
+/// Find all symlinks in other sources that point to the same skill directory
+pub async fn find_linked_skills(pool: &SqlitePool, skill_id: &str) -> Result<Vec<Skill>, String> {
+    let skill: Skill = sqlx::query_as("SELECT * FROM skills WHERE id = ?")
+        .bind(skill_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("Skill not found: {}", e))?;
+
+    let skill_name = std::path::Path::new(&skill.skill_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let linked: Vec<Skill> = sqlx::query_as(
+        "SELECT * FROM skills WHERE is_symlink = 1 AND source_id != ? AND skill_path LIKE ?"
+    )
+    .bind(&skill.source_id)
+    .bind(format!("%/{}", skill_name))
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(linked)
+}
+
 /// Create a new skill in the global source directory
 pub async fn create_skill(pool: &SqlitePool, body: &CreateSkillBody) -> Result<Skill, String> {
     let global_source: SkillSource = sqlx::query_as(
@@ -298,16 +324,33 @@ pub async fn create_skill(pool: &SqlitePool, body: &CreateSkillBody) -> Result<S
     })
 }
 
-/// Delete a skill entirely (directory or symlink)
-pub async fn delete_skill(pool: &SqlitePool, skill_id: &str) -> Result<(), String> {
+/// Delete a skill entirely, including cleaning up symlinks in other sources
+pub async fn delete_skill(pool: &SqlitePool, skill_id: &str) -> Result<Vec<String>, String> {
     let skill: Skill = sqlx::query_as("SELECT * FROM skills WHERE id = ?")
         .bind(skill_id)
         .fetch_one(pool)
         .await
         .map_err(|e| format!("Skill not found: {}", e))?;
 
-    let skill_path = Path::new(&skill.skill_path);
+    let mut cleanup_log = Vec::new();
 
+    // Find and remove all symlinks pointing to this skill in other sources
+    let linked = find_linked_skills(pool, skill_id).await?;
+    for link in &linked {
+        let link_path = std::path::Path::new(&link.skill_path);
+        if link_path.exists() || link_path.is_symlink() {
+            fs::remove_file(link_path).map_err(|e| format!("删除关联链接失败: {}", e))?;
+        }
+        sqlx::query("DELETE FROM skills WHERE id = ?")
+            .bind(&link.id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        cleanup_log.push(format!("已删除链接: {}", link.skill_path));
+    }
+
+    // Delete the skill itself
+    let skill_path = std::path::Path::new(&skill.skill_path);
     if skill.is_symlink {
         fs::remove_file(skill_path).map_err(|e| format!("删除符号链接失败: {}", e))?;
     } else if skill_path.is_dir() {
@@ -320,7 +363,7 @@ pub async fn delete_skill(pool: &SqlitePool, skill_id: &str) -> Result<(), Strin
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(())
+    Ok(cleanup_log)
 }
 
 /// Update SKILL.md content
