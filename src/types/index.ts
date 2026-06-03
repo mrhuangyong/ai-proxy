@@ -116,3 +116,5 @@ export interface LaunchRequest {
 export interface SetPathRequest {
   install_path: string
 }
+
+export type { McpServer, McpAppBinding, McpServerWithBindings, McpAppBindingInput, CreateMcpServerBody, UpdateMcpServerBody, ImportResult, ApplyResult } from './mcp'
