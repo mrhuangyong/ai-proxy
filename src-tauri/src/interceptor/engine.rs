@@ -154,6 +154,11 @@ impl InterceptorEngine {
                             request.stream = v;
                         }
                     }
+                    "thinking" => {
+                        if value.is_null() || value.as_bool() == Some(false) {
+                            request.thinking = None;
+                        }
+                    }
                     _ => {
                         tracing::warn!(
                             "Unknown override parameter: {}",

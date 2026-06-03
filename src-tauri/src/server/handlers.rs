@@ -116,7 +116,7 @@ async fn handle_proxy(
 
     let mut ir_request = match parser.parse_request(&body_value) {
         Ok(r) => {
-            info!("Parsed request: model={}, stream={}", r.model, r.stream);
+            info!("Parsed request: model={}, stream={}, thinking={:?}", r.model, r.stream, r.thinking);
             r
         }
         Err(e) => {
@@ -154,6 +154,14 @@ async fn handle_proxy(
         Ok(r) => {
             info!("Route found: model={} -> {} ({:?} via {})", ir_request.model, r.target_model, r.target_format, r.provider_name);
             info!("[ROUTE] {} -> {} ({})", ir_request.model, r.target_model, r.provider_name);
+            // Non-standard Anthropic endpoints (e.g. Kimi coding) don't support thinking parameter.
+            // Clear it to avoid upstream errors and max_tokens inflation.
+            if ir_request.thinking.is_some() {
+                if r.base_url.contains("kimi.com") || r.base_url.contains("moonshot.cn") {
+                    tracing::info!("Clearing thinking for non-standard Anthropic endpoint: {}", r.base_url);
+                    ir_request.thinking = None;
+                }
+            }
             r
         }
         Err(e) => {
@@ -638,6 +646,10 @@ async fn handle_proxy(
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
                         continue;
+                    }
+
+                    if trimmed.starts_with("data: ") {
+                        tracing::debug!("Upstream SSE: {}", trimmed);
                     }
 
                     let ir_chunk = match target_parser.parse_stream_chunk(trimmed) {
@@ -1425,6 +1437,13 @@ async fn handle_proxy(
                 }
             }
             if is_responses && started && !finished {
+                // Kimi 等非标准端点可能不发送 message_stop/message_delta，
+                // 但已经发送了实际内容。如果有内容，视为正常完成。
+                let has_content = !resp_accumulated_text.is_empty()
+                    || !resp_accumulated_args.is_empty()
+                    || resp_thinking_started;
+
+                // Close open items first
                 if resp_func_open {
                     yield Ok::<_, std::convert::Infallible>(Bytes::from(
                         format!("data: {}\n\n", serde_json::json!({
@@ -1439,6 +1458,7 @@ async fn handle_proxy(
                             }
                         }))
                     ));
+                    resp_func_open = false;
                 }
                 if resp_message_open {
                     if resp_text_part_open {
@@ -1450,7 +1470,9 @@ async fn handle_proxy(
                                 "text": resp_accumulated_text,
                             }))
                         ));
+                        resp_text_part_open = false;
                     }
+                    let status = if has_content { "completed" } else { "incomplete" };
                     yield Ok::<_, std::convert::Infallible>(Bytes::from(
                         format!("data: {}\n\n", serde_json::json!({
                             "type": "response.output_item.done",
@@ -1460,10 +1482,72 @@ async fn handle_proxy(
                                 "id": "msg_proxy",
                                 "role": "assistant",
                                 "content": [{"type": "output_text", "text": resp_accumulated_text}],
-                                "status": "incomplete",
+                                "status": status,
                             }
                         }))
-                    ))
+                    ));
+                    resp_message_open = false;
+                }
+
+                if has_content {
+                    // Graceful completion: upstream sent content but no proper termination
+                    tracing::info!("Stream completed without proper termination, synthesizing response.completed from accumulated content");
+                    let completed = serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "completed",
+                            "model": model_name,
+                            "output": build_responses_output_array(
+                                &resp_accumulated_text,
+                                &resp_accumulated_reasoning,
+                                resp_thinking_started,
+                                resp_func_open,
+                                &resp_call_id,
+                                &resp_func_name,
+                                &resp_accumulated_args,
+                            ),
+                            "usage": {
+                                "input_tokens": total_prompt,
+                                "output_tokens": total_completion,
+                                "total_tokens": total_prompt + total_completion,
+                            }
+                        }
+                    });
+                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
+                        format!("data: {}\n\n", completed)
+                    ));
+                    finished = true;
+                } else {
+                    // No content at all — report failure
+                    let failed_output = build_responses_output_array(
+                        &resp_accumulated_text,
+                        &resp_accumulated_reasoning,
+                        resp_thinking_started,
+                        resp_func_open,
+                        &resp_call_id,
+                        &resp_func_name,
+                        &resp_accumulated_args,
+                    );
+                    let failed_event = serde_json::json!({
+                        "type": "response.failed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "failed",
+                            "model": model_name,
+                            "output": failed_output,
+                        },
+                        "error": {
+                            "code": "server_error",
+                            "message": "stream disconnected before completion",
+                        }
+                    });
+                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
+                        format!("data: {}\n\n", failed_event)
+                    ));
+                    finished = true;
                 }
             }
 
@@ -1481,32 +1565,7 @@ async fn handle_proxy(
                         ));
                     }
                     ClientFormat::Responses => {
-                        let failed_output = build_responses_output_array(
-                            &resp_accumulated_text,
-                            &resp_accumulated_reasoning,
-                            resp_thinking_started,
-                            resp_func_open,
-                            &resp_call_id,
-                            &resp_func_name,
-                            &resp_accumulated_args,
-                        );
-                        let failed_event = serde_json::json!({
-                            "type": "response.failed",
-                            "response": {
-                                "id": response_id,
-                                "object": "response",
-                                "status": "failed",
-                                "model": model_name,
-                                "output": failed_output,
-                            },
-                            "error": {
-                                "code": "server_error",
-                                "message": "stream disconnected before completion",
-                            }
-                        });
-                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                            format!("data: {}\n\n", failed_event)
-                        ));
+                        // Already handled above
                     }
                 }
             }

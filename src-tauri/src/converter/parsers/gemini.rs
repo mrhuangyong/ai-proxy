@@ -138,6 +138,8 @@ impl FormatParser for GeminiParser {
 
         let data = if let Some(stripped) = trimmed.strip_prefix("data: ") {
             stripped.trim()
+        } else if let Some(stripped) = trimmed.strip_prefix("data:") {
+            stripped.trim()
         } else if trimmed.starts_with('{') {
             trimmed
         } else {

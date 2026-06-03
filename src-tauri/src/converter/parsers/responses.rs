@@ -94,13 +94,14 @@ impl FormatParser for ResponsesParser {
             .or_else(|| body.get("response_format").cloned());
 
         let thinking = body.get("reasoning").and_then(|r| {
+            let effort = r.get("effort")?.as_str()?;
             Some(IrThinkingConfig {
                 enabled: true,
-                budget_tokens: match r["effort"].as_str().unwrap_or("medium") {
+                budget_tokens: match effort {
                     "low" => Some(5000),
                     "medium" => Some(10000),
                     "high" => Some(30000),
-                    _ => None,
+                    _ => Some(10000),
                 },
             })
         });
@@ -139,11 +140,13 @@ impl FormatParser for ResponsesParser {
             return Ok(None);
         }
 
-        if !trimmed.starts_with("data: ") {
+        let data = if let Some(d) = trimmed.strip_prefix("data: ") {
+            d.trim()
+        } else if let Some(d) = trimmed.strip_prefix("data:") {
+            d.trim()
+        } else {
             return Ok(None);
-        }
-
-        let data = trimmed.strip_prefix("data: ").unwrap().trim();
+        };
 
         if data == "[DONE]" {
             return Ok(None);

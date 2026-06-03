@@ -226,10 +226,13 @@ impl FormatParser for CompletionsParser {
     }
 
     fn parse_stream_chunk(&self, line: &str) -> Result<Option<IrStreamChunk>, ProxyError> {
-        if !line.starts_with("data: ") {
+        let data = if let Some(d) = line.strip_prefix("data: ") {
+            d
+        } else if let Some(d) = line.strip_prefix("data:") {
+            d
+        } else {
             return Ok(None);
-        }
-        let data = &line[6..];
+        };
         if data == "[DONE]" {
             return Ok(Some(IrStreamChunk {
                 id: None,

@@ -138,11 +138,16 @@ impl FormatParser for AnthropicParser {
             return Ok(None);
         }
 
-        if !trimmed.starts_with("data: ") {
+        let data = if let Some(d) = trimmed.strip_prefix("data: ") {
+            d.trim()
+        } else if let Some(d) = trimmed.strip_prefix("data:") {
+            d.trim()
+        } else {
+            return Ok(None);
+        };
+        if data == "[DONE]" {
             return Ok(None);
         }
-
-        let data = trimmed.strip_prefix("data: ").unwrap().trim();
 
         let event: Value = serde_json::from_str(data)
             .map_err(|e| ProxyError::Parse(format!("failed to parse SSE chunk: {}", e)))?;
@@ -309,7 +314,29 @@ impl FormatParser for AnthropicParser {
                 usage: None,
                 error: None,
             })),
-            _ => Ok(None),
+            "error" => {
+                let error_data = &event["error"];
+                let error_type = error_data["type"].as_str().unwrap_or("api_error").to_string();
+                let error_msg = error_data["message"].as_str().unwrap_or("upstream error").to_string();
+
+                Ok(Some(IrStreamChunk {
+                    id: None,
+                    model: None,
+                    delta_content: None,
+                    delta_tool_calls: None,
+                    delta_thinking: None,
+                    finish_reason: Some("failed".to_string()),
+                    usage: None,
+                    error: Some(crate::converter::ir::IrStreamError {
+                        code: Some(error_type),
+                        message: error_msg,
+                    }),
+                }))
+            }
+            _ => {
+                tracing::debug!("Unknown Anthropic SSE event type: {}", event_type);
+                Ok(None)
+            }
         }
     }
 

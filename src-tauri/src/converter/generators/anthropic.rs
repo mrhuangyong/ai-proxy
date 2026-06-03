@@ -80,6 +80,11 @@ impl FormatGenerator for AnthropicGenerator {
             }
         }
 
+        // Ensure every tool_use has a matching tool_result.
+        // Anthropic API requires that assistant messages with tool_use be followed
+        // by user messages with tool_result for each tool_use_id.
+        messages = ensure_tool_results(messages);
+
         let mut body = json!({
             "model": ir.model,
             "messages": messages,
@@ -378,6 +383,80 @@ impl FormatGenerator for AnthropicGenerator {
             "usage": usage,
         }))
     }
+}
+
+fn ensure_tool_results(messages: Vec<Value>) -> Vec<Value> {
+    let mut result: Vec<Value> = Vec::new();
+    let mut i = 0;
+
+    while i < messages.len() {
+        let msg = &messages[i];
+        result.push(msg.clone());
+
+        // Check if this is an assistant message with tool_use blocks
+        let role = msg["role"].as_str().unwrap_or("");
+        if role == "assistant" {
+            if let Some(content) = msg["content"].as_array() {
+                let tool_use_ids: Vec<String> = content.iter()
+                    .filter(|b| b["type"].as_str() == Some("tool_use"))
+                    .filter_map(|b| b["id"].as_str().map(String::from))
+                    .collect();
+
+                if !tool_use_ids.is_empty() {
+                    // Collect tool_result ids from the next message(s) that are user/tool results
+                    let mut answered_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    let mut peek = i + 1;
+                    while peek < messages.len() {
+                        let next_role = messages[peek]["role"].as_str().unwrap_or("");
+                        if next_role != "user" { break; }
+                        if let Some(arr) = messages[peek]["content"].as_array() {
+                            for block in arr {
+                                if block["type"].as_str() == Some("tool_result") {
+                                    if let Some(id) = block["tool_use_id"].as_str() {
+                                        answered_ids.insert(id.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        // Only peek at consecutive user messages that contain tool_results
+                        let has_tool_result = messages[peek]["content"].as_array()
+                            .map(|arr| arr.iter().any(|b| b["type"].as_str() == Some("tool_result")))
+                            .unwrap_or(false);
+                        if !has_tool_result { break; }
+                        peek += 1;
+                    }
+
+                    // Find orphaned tool_use ids
+                    let orphaned: Vec<&String> = tool_use_ids.iter()
+                        .filter(|id| !answered_ids.contains(*id))
+                        .collect();
+
+                    if !orphaned.is_empty() {
+                        tracing::warn!(
+                            "Found {} orphaned tool_use(s) without tool_result, adding placeholders: {:?}",
+                            orphaned.len(),
+                            orphaned
+                        );
+                        let tool_results: Vec<Value> = orphaned.iter().map(|id| {
+                            json!({
+                                "type": "tool_result",
+                                "tool_use_id": id,
+                                "content": "",
+                            })
+                        }).collect();
+                        result.push(json!({
+                            "role": "user",
+                            "content": tool_results,
+                        }));
+                    }
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    result
 }
 
 fn extract_text_parts(parts: &[IrContentPart]) -> String {
