@@ -60,6 +60,19 @@ fn parse_gemini_model_segment(segment: &str) -> (String, bool) {
     (model, is_stream)
 }
 
+fn truncate_str(s: &str, max_len: usize) -> std::borrow::Cow<'_, str> {
+    if s.len() <= max_len {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        let boundary = s.char_indices()
+            .take_while(|(i, _)| *i < max_len)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(max_len.min(s.len()));
+        std::borrow::Cow::Owned(format!("{}... (truncated, {} bytes total)", &s[..boundary], s.len()))
+    }
+}
+
 async fn handle_proxy(
     request: Request,
     client_format: ClientFormat,
@@ -103,14 +116,16 @@ async fn handle_proxy(
         info!("[REQ] {:?} model={} stream={}", client_format, model_hint, stream);
     }
 
-    // Debug: log raw messages when tool-related content is present
-    if let Some(msgs) = body_value["messages"].as_array() {
-        let has_tool = msgs.iter().any(|m| {
-            let role = m["role"].as_str().unwrap_or("");
-            role == "tool" || role == "function" || m.get("tool_calls").is_some() || m.get("function_call").is_some()
-        });
-        if has_tool {
-            tracing::warn!("RAW REQUEST messages: {}", serde_json::to_string(&body_value["messages"]).unwrap_or_default());
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        if let Some(msgs) = body_value["messages"].as_array() {
+            let has_tool = msgs.iter().any(|m| {
+                let role = m["role"].as_str().unwrap_or("");
+                role == "tool" || role == "function" || m.get("tool_calls").is_some() || m.get("function_call").is_some()
+            });
+            if has_tool {
+                let serialized = serde_json::to_string(&body_value["messages"]).unwrap_or_default();
+                tracing::debug!("RAW REQUEST messages: {}", truncate_str(&serialized, 2000));
+            }
         }
     }
 
@@ -264,11 +279,14 @@ async fn handle_proxy(
         }
     };
 
-    if ir_request_for_upstream.messages.iter().any(|m| m.role == IrRole::Tool) {
-        tracing::warn!("TOOL DEBUG messages for model={}: {}",
-            ir_request_for_upstream.model,
-            serde_json::to_string(&target_body["messages"]).unwrap_or_default()
-        );
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        if ir_request_for_upstream.messages.iter().any(|m| m.role == IrRole::Tool) {
+            let serialized = serde_json::to_string(&target_body["messages"]).unwrap_or_default();
+            tracing::debug!("TOOL DEBUG messages for model={}: {}",
+                ir_request_for_upstream.model,
+                truncate_str(&serialized, 2000)
+            );
+        }
     }
 
     let mut url = format!("{}{}", route.base_url.trim_end_matches('/'), route.endpoint_path);

@@ -16,6 +16,9 @@
             <n-button @click="openApplyModal">
               应用配置
             </n-button>
+            <n-button @click="openJsonViewAll">
+              JSON 视图
+            </n-button>
             <n-button type="primary" @click="openCreateModal">
               添加 MCP
             </n-button>
@@ -29,6 +32,7 @@
           :data="servers"
           :row-key="(row: McpServerWithBindings) => row.id"
           :bordered="false"
+          :scroll-x="900"
         />
       </n-spin>
     </n-card>
@@ -121,16 +125,6 @@
           </n-button>
         </n-space>
 
-        <n-divider>应用绑定</n-divider>
-
-        <n-checkbox-group v-model:value="form.bindings">
-          <n-space>
-            <n-checkbox value="claude_cli" label="Claude CLI" />
-            <n-checkbox value="claude_desktop" label="Claude Desktop" />
-            <n-checkbox value="codex_cli" label="Codex CLI" />
-            <n-checkbox value="codex_desktop" label="Codex Desktop" />
-          </n-space>
-        </n-checkbox-group>
       </n-form>
     </n-modal>
 
@@ -151,19 +145,85 @@
           <n-space vertical>
             <n-checkbox value="claude_cli" label="Claude CLI" />
             <n-checkbox value="claude_desktop" label="Claude Desktop" />
-            <n-checkbox value="codex_cli" label="Codex CLI" />
-            <n-checkbox value="codex_desktop" label="Codex Desktop" />
+            <n-checkbox value="codex" label="Codex" />
           </n-space>
         </n-checkbox-group>
       </n-space>
+    </n-modal>
+
+    <!-- Apply Row Modal -->
+    <n-modal
+      v-model:show="showApplyRowModal"
+      preset="dialog"
+      :title="`应用 MCP - ${applyRowServer?.name || ''}`"
+      positive-text="应用"
+      negative-text="取消"
+      :loading="applyRowLoading"
+      @positive-click="handleApplyRow"
+      style="width: 420px"
+    >
+      <n-space vertical>
+        <n-text>选择要注入到哪些应用：</n-text>
+        <n-checkbox-group v-model:value="applyRowTargets">
+          <n-space vertical>
+            <n-checkbox value="claude_cli" label="Claude CLI" />
+            <n-checkbox value="claude_desktop" label="Claude Desktop" />
+            <n-checkbox value="codex" label="Codex" />
+          </n-space>
+        </n-checkbox-group>
+      </n-space>
+    </n-modal>
+
+    <!-- JSON Editor Modal -->
+    <n-modal
+      v-model:show="showJsonModal"
+      :style="jsonEditorFullscreen ? { width: '100vw', top: 0, left: 0, margin: 0 } : { width: '780px' }"
+    >
+      <n-card
+        title="JSON 配置编辑器"
+        :bordered="false"
+        size="small"
+        role="dialog"
+        aria-modal="true"
+      >
+        <template #header-extra>
+          <n-button quaternary size="small" @click="jsonEditorFullscreen = !jsonEditorFullscreen">
+            <template #icon>
+              <n-icon><contract-outline v-if="jsonEditorFullscreen" /><expand-outline v-else /></n-icon>
+            </template>
+          </n-button>
+        </template>
+        <div :style="{
+          height: jsonEditorFullscreen ? 'calc(100vh - 160px)' : '480px',
+          overflow: 'hidden',
+          border: '1px solid #313244',
+          borderRadius: '4px'
+        }">
+          <codemirror
+            v-model="jsonViewContent"
+            :style="{ height: '100%' }"
+            :extensions="jsonEditorExtensions"
+          />
+        </div>
+        <template #action>
+          <n-space justify="end">
+            <n-button @click="showJsonModal = false">取消</n-button>
+            <n-button type="primary" :loading="jsonSaveLoading" @click="handleJsonSave">保存</n-button>
+          </n-space>
+        </template>
+      </n-card>
     </n-modal>
   </n-space>
 </template>
 
 <script setup lang="ts">
-import { ref, h, onMounted } from 'vue'
-import { NTag, NPopconfirm, NButton, NSpace, NTooltip, useMessage } from 'naive-ui'
-import { DownloadOutline } from '@vicons/ionicons5'
+import { ref, h, onMounted, computed } from 'vue'
+import { NTag, NPopconfirm, NButton, NSpace, NTooltip, NIcon, useMessage } from 'naive-ui'
+import { DownloadOutline, ExpandOutline, ContractOutline } from '@vicons/ionicons5'
+import { Codemirror } from 'vue-codemirror'
+import { basicSetup } from 'codemirror'
+import { json } from '@codemirror/lang-json'
+import { oneDark } from '@codemirror/theme-one-dark'
 import { api } from '../api'
 import type { McpServerWithBindings, McpAppBindingInput, CreateMcpServerBody } from '../types/mcp'
 import type { AppType } from '../types'
@@ -175,6 +235,8 @@ interface EnvPair {
 
 const message = useMessage()
 const loading = ref(false)
+
+const jsonEditorExtensions = computed(() => [basicSetup, json(), oneDark])
 const servers = ref<McpServerWithBindings[]>([])
 const showModal = ref(false)
 const isEditing = ref(false)
@@ -183,6 +245,14 @@ const modalLoading = ref(false)
 const showApplyModal = ref(false)
 const applyLoading = ref(false)
 const applyTargets = ref<string[]>([])
+const showApplyRowModal = ref(false)
+const applyRowLoading = ref(false)
+const applyRowTargets = ref<string[]>([])
+const applyRowServer = ref<McpServerWithBindings | null>(null)
+const showJsonModal = ref(false)
+const jsonViewContent = ref('')
+const jsonSaveLoading = ref(false)
+const jsonEditorFullscreen = ref(false)
 
 const form = ref({
   name: '',
@@ -192,7 +262,6 @@ const form = ref({
   url: '',
   headers: '',
   envPairs: [] as EnvPair[],
-  bindings: [] as string[],
 })
 
 const transportTypeOptions = [
@@ -210,15 +279,13 @@ const transportColorMap: Record<string, string> = {
 const appNameMap: Record<string, string> = {
   claude_cli: 'Claude CLI',
   claude_desktop: 'Claude Desktop',
-  codex_cli: 'Codex CLI',
-  codex_desktop: 'Codex Desktop',
+  codex: 'Codex',
 }
 
 const importOptions = [
   { label: 'Claude CLI', key: 'claude_cli' },
   { label: 'Claude Desktop', key: 'claude_desktop' },
-  { label: 'Codex CLI', key: 'codex_cli' },
-  { label: 'Codex Desktop', key: 'codex_desktop' },
+  { label: 'Codex', key: 'codex' },
 ]
 
 const columns = [
@@ -258,14 +325,23 @@ const columns = [
     key: 'bindings',
     width: 200,
     render: (row: McpServerWithBindings) => {
-      const boundApps = row.bindings
-        .filter((b) => b.enabled)
-        .map((b) => appNameMap[b.app_type] || b.app_type)
-      if (boundApps.length === 0) {
+      const enabledBindings = row.bindings.filter((b) => b.enabled)
+      const hasCodexCli = enabledBindings.some((b) => b.app_type === 'codex_cli')
+      const hasCodexDesktop = enabledBindings.some((b) => b.app_type === 'codex_desktop')
+      const displayNames: string[] = []
+      for (const b of enabledBindings) {
+        if ((b.app_type === 'codex_cli' || b.app_type === 'codex_desktop') && hasCodexCli && hasCodexDesktop) {
+          if (b.app_type === 'codex_cli') displayNames.push('Codex')
+          continue
+        }
+        const name = appNameMap[b.app_type] || b.app_type
+        if (!displayNames.includes(name)) displayNames.push(name)
+      }
+      if (displayNames.length === 0) {
         return h(NTag, { size: 'small', type: 'default' as never }, () => '未绑定')
       }
       return h(NSpace, { size: 4 }, () =>
-        boundApps.map((name) =>
+        displayNames.map((name) =>
           h(NTag, { size: 'small', type: 'success' as never }, () => name)
         )
       )
@@ -274,13 +350,19 @@ const columns = [
   {
     title: '操作',
     key: 'actions',
-    width: 240,
+    width: 200,
+    fixed: 'right',
     render: (row: McpServerWithBindings) =>
       h(NSpace, { size: 4 }, () => [
         h(
           NButton,
           { size: 'small', quaternary: true, type: 'primary', onClick: () => openEditModal(row) },
           () => '编辑'
+        ),
+        h(
+          NButton,
+          { size: 'small', quaternary: true, type: 'info', onClick: () => openApplyRowModal(row) },
+          () => '应用'
         ),
         h(
           NPopconfirm,
@@ -352,7 +434,6 @@ function openCreateModal() {
     url: '',
     headers: '',
     envPairs: [],
-    bindings: [],
   }
   showModal.value = true
 }
@@ -368,9 +449,6 @@ function openEditModal(row: McpServerWithBindings) {
     url: row.url || '',
     headers: row.headers || '',
     envPairs: parseEnvFromJson(row.env),
-    bindings: row.bindings
-      .filter((b) => b.enabled)
-      .map((b) => b.app_type),
   }
   showModal.value = true
 }
@@ -404,10 +482,6 @@ async function handleSubmit() {
   try {
     const envJson = buildEnvJson()
     const headersJson = form.value.transport_type !== 'stdio' ? buildHeadersJson() : null
-    const bindings: McpAppBindingInput[] = form.value.bindings.map((appType) => ({
-      app_type: appType as AppType,
-      enabled: true,
-    }))
 
     if (isEditing.value) {
       const updateBody: Record<string, unknown> = {
@@ -432,11 +506,6 @@ async function handleSubmit() {
         body: JSON.stringify(updateBody),
       })
 
-      await api(`/api/mcp/servers/${editingId.value}/bindings`, {
-        method: 'PUT',
-        body: JSON.stringify({ bindings }),
-      })
-
       message.success('MCP 更新成功')
     } else {
       const createBody: CreateMcpServerBody = {
@@ -451,7 +520,6 @@ async function handleSubmit() {
         createBody.headers = headersJson
       }
       createBody.env = envJson
-      createBody.bindings = bindings
 
       await api('/api/mcp/servers', {
         method: 'POST',
@@ -467,6 +535,99 @@ async function handleSubmit() {
     message.error(`${isEditing.value ? '更新' : '创建'}失败: ${err}`)
   } finally {
     modalLoading.value = false
+  }
+  return false
+}
+
+function openJsonViewAll() {
+  const all: Record<string, Record<string, unknown>> = {}
+  for (const row of servers.value) {
+    const config: Record<string, unknown> = {}
+    if (row.transport_type === 'stdio') {
+      config.type = 'stdio'
+      if (row.command) config.command = row.command
+      if (row.args) {
+        try { config.args = JSON.parse(row.args) } catch { config.args = row.args }
+      }
+    } else {
+      config.type = row.transport_type
+      if (row.url) config.url = row.url
+      if (row.headers) {
+        try { config.headers = JSON.parse(row.headers) } catch { config.headers = row.headers }
+      }
+    }
+    if (row.env) {
+      try { config.env = JSON.parse(row.env) } catch { config.env = row.env }
+    }
+    all[row.name] = config
+  }
+  jsonViewContent.value = JSON.stringify({ mcpServers: all }, null, 2)
+  jsonEditorFullscreen.value = false
+  showJsonModal.value = true
+}
+
+async function handleJsonSave() {
+  let parsed: { mcpServers: Record<string, Record<string, unknown>> }
+  try {
+    parsed = JSON.parse(jsonViewContent.value)
+  } catch {
+    message.error('JSON 格式错误')
+    return false
+  }
+
+  const entries = parsed.mcpServers
+  if (!entries || typeof entries !== 'object') {
+    message.error('缺少 mcpServers 字段')
+    return false
+  }
+
+  jsonSaveLoading.value = true
+  try {
+    const existingMap = new Map(servers.value.map((s) => [s.name, s]))
+    const newNames = new Set(Object.keys(entries))
+
+    for (const name of newNames) {
+      const entry = entries[name]
+      const body: Record<string, unknown> = {
+        name,
+        transport_type: (entry.type as string) || 'stdio',
+      }
+      if (body.transport_type === 'stdio') {
+        if (entry.command) body.command = entry.command
+        if (entry.args) body.args = Array.isArray(entry.args) ? JSON.stringify(entry.args) : entry.args
+      } else {
+        if (entry.url) body.url = entry.url
+        if (entry.headers && typeof entry.headers === 'object') body.headers = JSON.stringify(entry.headers)
+      }
+      if (entry.env && typeof entry.env === 'object') body.env = JSON.stringify(entry.env)
+
+      const existing = existingMap.get(name)
+      if (existing) {
+        await api(`/api/mcp/servers/${existing.id}`, {
+          method: 'PUT',
+          body: JSON.stringify(body),
+        })
+      } else {
+        await api('/api/mcp/servers', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        })
+      }
+    }
+
+    for (const [name, server] of existingMap) {
+      if (!newNames.has(name)) {
+        await api(`/api/mcp/servers/${server.id}`, { method: 'DELETE' })
+      }
+    }
+
+    message.success('JSON 配置已保存')
+    showJsonModal.value = false
+    await fetchServers()
+  } catch (err) {
+    message.error(`保存失败: ${err}`)
+  } finally {
+    jsonSaveLoading.value = false
   }
   return false
 }
@@ -504,6 +665,69 @@ async function handleApply() {
     message.error(`应用失败: ${err}`)
   } finally {
     applyLoading.value = false
+  }
+  return false
+}
+
+function openApplyRowModal(row: McpServerWithBindings) {
+  applyRowServer.value = row
+  const enabledTypes = row.bindings
+    .filter((b) => b.enabled)
+    .map((b) => b.app_type)
+  const targets: string[] = []
+  for (const t of enabledTypes) {
+    if (t === 'codex_cli' || t === 'codex_desktop') {
+      if (!targets.includes('codex')) targets.push('codex')
+    } else {
+      targets.push(t)
+    }
+  }
+  applyRowTargets.value = targets
+  showApplyRowModal.value = true
+}
+
+async function handleApplyRow() {
+  if (applyRowTargets.value.length === 0 && !applyRowServer.value) {
+    message.warning('请至少选择一个应用')
+    return false
+  }
+
+  const server = applyRowServer.value!
+  applyRowLoading.value = true
+  try {
+    const allApps = ['claude_cli', 'claude_desktop', 'codex_cli', 'codex_desktop']
+    const selectedApps = applyRowTargets.value.flatMap((t) =>
+      t === 'codex' ? ['codex_cli', 'codex_desktop'] : [t]
+    )
+    const bindings: McpAppBindingInput[] = allApps.map((appType) => ({
+      app_type: appType as AppType,
+      enabled: selectedApps.includes(appType),
+    }))
+
+    await api(`/api/mcp/servers/${server.id}/bindings`, {
+      method: 'PUT',
+      body: JSON.stringify({ bindings }),
+    })
+
+    const appsToApply = new Set<string>()
+    for (const app of selectedApps) {
+      if (app === 'codex_cli' || app === 'codex_desktop') {
+        appsToApply.add('codex')
+      } else {
+        appsToApply.add(app)
+      }
+    }
+    for (const appType of appsToApply) {
+      await api(`/api/mcp/apply/${appType}`, { method: 'POST' })
+    }
+
+    message.success('配置已应用')
+    showApplyRowModal.value = false
+    await fetchServers()
+  } catch (err) {
+    message.error(`应用失败: ${err}`)
+  } finally {
+    applyRowLoading.value = false
   }
   return false
 }

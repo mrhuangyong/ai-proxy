@@ -26,7 +26,7 @@ impl fmt::Display for AppType {
 impl AppType {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "codex_cli" => Some(AppType::CodexCli),
+            "codex" | "codex_cli" => Some(AppType::CodexCli),
             "codex_desktop" => Some(AppType::CodexDesktop),
             "claude_cli" => Some(AppType::ClaudeCli),
             "claude_desktop" => Some(AppType::ClaudeDesktop),

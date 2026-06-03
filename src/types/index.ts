@@ -118,3 +118,16 @@ export interface SetPathRequest {
 }
 
 export type { McpServer, McpAppBinding, McpServerWithBindings, McpAppBindingInput, CreateMcpServerBody, UpdateMcpServerBody, ImportResult, ApplyResult } from './mcp'
+
+export type {
+  SkillSource,
+  SkillSourceWithCount,
+  Skill,
+  SkillDetail,
+  CreateSkillSourceBody,
+  CreateSkillBody,
+  UpdateSkillMdBody,
+  InstallSkillBody,
+  UninstallSkillBody,
+  InstallFromUrlBody,
+} from './skill'

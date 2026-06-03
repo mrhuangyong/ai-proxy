@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 const BUFFER_CAPACITY: usize = 2000;
 const CHANNEL_CAPACITY: usize = 1000;
+const MAX_MESSAGE_LEN: usize = 4096;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
@@ -109,11 +110,19 @@ where
         event.record(&mut visitor);
 
         let metadata = event.metadata();
+        let message = if visitor.message.len() > MAX_MESSAGE_LEN {
+            let mut truncated: String = visitor.message.chars().take(MAX_MESSAGE_LEN).collect();
+            truncated.push_str("... (truncated)");
+            truncated
+        } else {
+            visitor.message
+        };
+
         let entry = LogEntry {
             timestamp: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
             level: metadata.level().to_string(),
             target: metadata.target().to_string(),
-            message: visitor.message,
+            message,
         };
 
         if let Ok(mut buf) = self.buffer.lock() {

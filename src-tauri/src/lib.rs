@@ -11,6 +11,7 @@ mod logging;
 mod server;
 mod apps;
 mod mcp;
+mod skill;
 mod update;
 mod update_timer;
 

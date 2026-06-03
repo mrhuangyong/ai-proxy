@@ -137,6 +137,20 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 011: MCP Server management tables");
     }
 
+    // Migration 012: Skill management tables
+    let has_skill_sources: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='skill_sources'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_skill_sources {
+        let migration12 = include_str!("../../migrations/012_create_skill_tables.sql");
+        sqlx::query(migration12).execute(pool).await?;
+        info!("Applied migration 012: Skill management tables");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }
