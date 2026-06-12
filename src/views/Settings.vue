@@ -31,7 +31,7 @@
 
     <n-card title="网络设置">
       <n-form label-placement="left" label-width="140" style="max-width: 520px">
-        <n-form-item label="HTTP 端口">
+        <n-form-item v-if="isTauri" label="HTTP 端口">
           <n-input-number
             v-model:value="settings.port"
             :min="1"

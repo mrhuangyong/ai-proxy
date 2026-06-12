@@ -86,14 +86,14 @@
               <span class="status-dot" :class="serverRunning ? 'running' : 'stopped'" />
               <span>{{ serverRunning ? `127.0.0.1:${proxyPort}` : '已停止' }}</span>
             </n-space>
-            <n-dropdown v-if="!isTauri && authStore.isAuthenticated" trigger="click" :options="userMenuOptions" @select="handleUserMenuSelect">
-              <n-button quaternary size="tiny" style="color: var(--text-2)">
+            <template v-if="!isTauri">
+              <n-button quaternary size="tiny" @click="handleLogout" style="color: var(--text-2)">
                 <template #icon>
-                  <n-icon size="16"><PersonCircleOutline /></n-icon>
+                  <n-icon size="16"><LogOutOutline /></n-icon>
                 </template>
-                {{ authStore.user?.username || 'admin' }}
+                退出
               </n-button>
-            </n-dropdown>
+            </template>
           </n-space>
         </div>
         <n-layout-content content-style="padding: 20px 24px;">
@@ -128,7 +128,6 @@ import {
   BookOutline,
   SunnyOutline,
   MoonOutline,
-  PersonCircleOutline,
   LogOutOutline,
 } from '@vicons/ionicons5'
 
@@ -144,15 +143,9 @@ const authStore = useAuthStore()
 
 const isLoginRoute = computed(() => route.name === 'Login')
 
-const userMenuOptions = [
-  { label: '退出登录', key: 'logout', icon: () => h(NIcon, null, () => h(LogOutOutline)) },
-]
-
-async function handleUserMenuSelect(key: string) {
-  if (key === 'logout') {
-    await authStore.logout()
-    router.replace({ name: 'Login' })
-  }
+async function handleLogout() {
+  await authStore.logout()
+  router.replace({ name: 'Login' })
 }
 
 setUnauthorizedHandler(() => {
@@ -185,13 +178,20 @@ const overviewMenu = [
   { label: '仪表盘', key: '/', icon: renderIcon(HomeOutline) },
 ]
 
-const manageMenu = [
-  { label: '供应商', key: '/providers', icon: renderIcon(CloudOutline) },
-  { label: '应用管理', key: '/apps', icon: renderIcon(AppsOutline) },
-  { label: 'MCP 管理', key: '/mcp', icon: renderIcon(GitNetworkOutline) },
-  { label: '技能管理', key: '/skills', icon: renderIcon(BookOutline) },
-  { label: '拦截规则', key: '/rules', icon: renderIcon(SettingsOutline) },
-]
+const manageMenu = computed(() => {
+  const items = [
+    { label: '供应商', key: '/providers', icon: renderIcon(CloudOutline) },
+    { label: '拦截规则', key: '/rules', icon: renderIcon(SettingsOutline) },
+  ]
+  if (isTauri) {
+    items.splice(1, 0,
+      { label: '应用管理', key: '/apps', icon: renderIcon(AppsOutline) },
+      { label: 'MCP 管理', key: '/mcp', icon: renderIcon(GitNetworkOutline) },
+      { label: '技能管理', key: '/skills', icon: renderIcon(BookOutline) },
+    )
+  }
+  return items
+})
 
 const logsMenu = [
   { label: '请求日志', key: '/logs', icon: renderIcon(DocumentTextOutline) },
