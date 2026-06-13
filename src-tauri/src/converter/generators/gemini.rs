@@ -1,4 +1,4 @@
-use crate::converter::ir::{IrContentPart, IrRequest, IrResponse, IrRole, IrStreamChunk};
+use crate::converter::ir::{round2, IrContentPart, IrRequest, IrResponse, IrRole, IrStreamChunk};
 use crate::converter::FormatGenerator;
 use crate::error::ProxyError;
 use serde_json::{json, Value};
@@ -48,12 +48,12 @@ impl FormatGenerator for GeminiGenerator {
         let mut has_config = false;
 
         if let Some(temperature) = ir.temperature {
-            generation_config["temperature"] = json!(temperature);
+            generation_config["temperature"] = json!(round2(temperature));
             has_config = true;
         }
 
         if let Some(top_p) = ir.top_p {
-            generation_config["topP"] = json!(top_p);
+            generation_config["topP"] = json!(round2(top_p));
             has_config = true;
         }
 

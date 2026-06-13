@@ -1,4 +1,4 @@
-use crate::converter::ir::{IrContentPart, IrRequest, IrResponse, IrRole, IrStreamChunk};
+use crate::converter::ir::{round2, IrContentPart, IrRequest, IrResponse, IrRole, IrStreamChunk};
 use crate::converter::FormatGenerator;
 use crate::error::ProxyError;
 use serde_json::{json, Value};
@@ -109,11 +109,11 @@ impl FormatGenerator for ResponsesGenerator {
         }
 
         if let Some(temperature) = ir.temperature {
-            body["temperature"] = json!(temperature);
+            body["temperature"] = json!(round2(temperature));
         }
 
         if let Some(top_p) = ir.top_p {
-            body["top_p"] = json!(top_p);
+            body["top_p"] = json!(round2(top_p));
         }
 
         if let Some(max_tokens) = ir.max_tokens {

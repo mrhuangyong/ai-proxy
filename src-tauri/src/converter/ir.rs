@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+pub fn round2(v: f32) -> f32 {
+    (v * 100.0).round() / 100.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IrRequest {
     pub model: String,
