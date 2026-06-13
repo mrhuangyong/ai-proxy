@@ -72,6 +72,8 @@ const todayTokens = ref(0)
 const timeRange = ref<'today' | 'week' | 'month'>('today')
 const chartRef = ref<HTMLElement | null>(null)
 let chart: echarts.ECharts | null = null
+let refreshTimer: ReturnType<typeof setInterval> | null = null
+let isRefreshing = false
 
 interface UsageResponse {
   stats: Array<{
@@ -175,33 +177,52 @@ function handleResize() {
   chart?.resize()
 }
 
-onMounted(async () => {
+async function refreshStats() {
+  if (isRefreshing) return
+  isRefreshing = true
   try {
-    const providers = await api<Provider[]>('/api/providers')
+    const [providers, usage] = await Promise.all([
+      api<Provider[]>('/api/providers'),
+      api<UsageResponse>('/api/usage?days=1'),
+    ])
     providerCount.value = providers.length
-    const totalModels = providers.reduce((sum, p) => sum + p.models.length, 0)
-    routeCount.value = totalModels
-  } catch {
-    // silently fail
-  }
-
-  try {
-    const usage = await api<UsageResponse>('/api/usage?days=1')
+    routeCount.value = providers.reduce((sum, p) => sum + p.models.length, 0)
     todayRequests.value = usage.total_requests
     todayTokens.value = usage.stats.reduce((sum, s) => sum + s.total_tokens, 0)
   } catch {
     // silently fail
+  } finally {
+    isRefreshing = false
   }
+}
 
+function startRefresh() {
+  refreshStats()
+  fetchTrend()
+  refreshTimer = setInterval(() => {
+    refreshStats()
+    fetchTrend()
+  }, 10_000)
+}
+
+function stopRefresh() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
+}
+
+onMounted(async () => {
   await nextTick()
   if (chartRef.value) {
     chart = echarts.init(chartRef.value)
   }
-  fetchTrend()
+  startRefresh()
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
+  stopRefresh()
   window.removeEventListener('resize', handleResize)
   chart?.dispose()
 })
