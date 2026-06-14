@@ -269,10 +269,11 @@ impl FormatParser for AnthropicParser {
                         .get("output_tokens_details")
                         .and_then(|d| d["thinking_tokens"].as_u64())
                         .unwrap_or(0);
+                    let prompt = if cached > input { input + cached } else { input };
                     IrUsage {
-                        prompt_tokens: input as u32,
+                        prompt_tokens: prompt as u32,
                         completion_tokens: output as u32,
-                        total_tokens: (input + output) as u32,
+                        total_tokens: (prompt + output) as u32,
                         cached_tokens: cached as u32,
                         cache_creation_input_tokens: cache_creation as u32,
                         thinking_tokens: thinking as u32,
@@ -305,10 +306,11 @@ impl FormatParser for AnthropicParser {
                         .or_else(|| u["cached_tokens"].as_u64())
                         .unwrap_or(0);
                     let cache_creation = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    let prompt = if cached > input { input + cached } else { input };
                     IrUsage {
-                        prompt_tokens: input as u32,
+                        prompt_tokens: prompt as u32,
                         completion_tokens: 0,
-                        total_tokens: input as u32,
+                        total_tokens: prompt as u32,
                         cached_tokens: cached as u32,
                         cache_creation_input_tokens: cache_creation as u32,
                         thinking_tokens: 0,
@@ -460,10 +462,11 @@ impl FormatParser for AnthropicParser {
                     .get("output_tokens_details")
                     .and_then(|d| d["thinking_tokens"].as_u64())
                     .unwrap_or(0);
+                let prompt = if cached > input { input + cached } else { input };
                 IrUsage {
-                    prompt_tokens: input as u32,
+                    prompt_tokens: prompt as u32,
                     completion_tokens: output as u32,
-                    total_tokens: (input + output) as u32,
+                    total_tokens: (prompt + output) as u32,
                     cached_tokens: cached as u32,
                     cache_creation_input_tokens: cache_creation as u32,
                     thinking_tokens: thinking as u32,

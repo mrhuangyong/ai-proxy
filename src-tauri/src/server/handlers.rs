@@ -1182,14 +1182,14 @@ async fn handle_proxy(
                         // - Gemini: each chunk carries cumulative totals
                         // - Responses: response.completed carries full totals
                         // Use "latest non-zero" instead of accumulation to avoid double-counting.
+                        // NOTE: cached_tokens is tied to prompt_tokens so both always come
+                        // from the same event, preventing cross-event mismatch.
                         if usage.prompt_tokens > 0 {
                             total_prompt = usage.prompt_tokens;
+                            total_cached = usage.cached_tokens;
                         }
                         if usage.completion_tokens > 0 {
                             total_completion = usage.completion_tokens;
-                        }
-                        if usage.cached_tokens > 0 {
-                            total_cached = usage.cached_tokens;
                         }
                         stream_state_ref.prompt_tokens.store(total_prompt, Ordering::SeqCst);
                         stream_state_ref.completion_tokens.store(total_completion, Ordering::SeqCst);
@@ -1861,9 +1861,8 @@ async fn handle_proxy(
                         match target_parser.parse_stream_chunk(trimmed) {
                             Ok(Some(ir_chunk)) => {
                                 if let Some(usage) = &ir_chunk.usage {
-                                    if usage.prompt_tokens > 0 { total_prompt = usage.prompt_tokens; }
+                                    if usage.prompt_tokens > 0 { total_prompt = usage.prompt_tokens; total_cached = usage.cached_tokens; }
                                     if usage.completion_tokens > 0 { total_completion = usage.completion_tokens; }
-                                    if usage.cached_tokens > 0 { total_cached = usage.cached_tokens; }
                                 }
                                 if is_responses {
                                     // For Responses format, only handle finish events from remaining buffer
