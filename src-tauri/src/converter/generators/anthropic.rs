@@ -9,6 +9,7 @@ impl FormatGenerator for AnthropicGenerator {
     fn generate_request(&self, ir: &IrRequest) -> Result<Value, ProxyError> {
         let mut system_parts: Vec<String> = Vec::new();
         let mut messages: Vec<Value> = Vec::new();
+        let mut pending_tool_results: Vec<(String, String)> = Vec::new();
 
         for msg in &ir.messages {
             match msg.role {
@@ -26,21 +27,19 @@ impl FormatGenerator for AnthropicGenerator {
                         _ => "user",
                     };
 
-                    // Tool role messages: generate as tool_result content blocks
+                    // Buffer consecutive Tool messages to merge into a single
+                    // user message. The Anthropic API requires every tool_use
+                    // from one assistant message to be answered by a single
+                    // user message containing all matching tool_results.
                     if msg.role == IrRole::Tool {
-                        let tool_use_id = msg.tool_call_id.as_deref().unwrap_or("");
+                        let tool_use_id = msg.tool_call_id.as_deref().unwrap_or("").to_string();
                         let text = extract_text_parts(&msg.content);
-                        let content = json!([{
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": text,
-                        }]);
-                        messages.push(json!({
-                            "role": "user",
-                            "content": content,
-                        }));
+                        pending_tool_results.push((tool_use_id, text));
                         continue;
                     }
+
+                    // Flush buffered tool results before a non-Tool message
+                    flush_pending_tool_results(&mut pending_tool_results, &mut messages);
 
                     // Filter out ToolUse from content — handled via msg.tool_calls below
                     let content_for_conv: Vec<IrContentPart> = if msg.role == IrRole::Assistant {
@@ -100,6 +99,9 @@ impl FormatGenerator for AnthropicGenerator {
                 }
             }
         }
+
+        // Flush remaining buffered tool results
+        flush_pending_tool_results(&mut pending_tool_results, &mut messages);
 
         // Ensure every tool_use has a matching tool_result.
         // Anthropic API requires that assistant messages with tool_use be followed
@@ -456,6 +458,29 @@ impl FormatGenerator for AnthropicGenerator {
             "usage": usage,
         }))
     }
+}
+
+fn flush_pending_tool_results(
+    pending: &mut Vec<(String, String)>,
+    messages: &mut Vec<Value>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let blocks: Vec<Value> = pending
+        .drain(..)
+        .map(|(tool_use_id, text)| {
+            json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": text,
+            })
+        })
+        .collect();
+    messages.push(json!({
+        "role": "user",
+        "content": blocks,
+    }));
 }
 
 fn ensure_tool_results(messages: Vec<Value>) -> Vec<Value> {

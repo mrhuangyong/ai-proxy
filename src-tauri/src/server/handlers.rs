@@ -2307,7 +2307,7 @@ async fn query_model_routes() -> Result<Vec<ModelRouteInfo>, ProxyError> {
         "SELECT pm.model_name, p.name, pm.target_model, p.format \
          FROM provider_models pm \
          JOIN providers p ON pm.provider_id = p.id \
-         WHERE pm.enabled = 1 \
+         WHERE pm.enabled = 1 AND p.enabled = 1 \
          ORDER BY pm.model_name",
     )
     .fetch_all(pool)
