@@ -277,6 +277,7 @@ impl FormatParser for AnthropicParser {
                         cached_tokens: cached as u32,
                         cache_creation_input_tokens: cache_creation as u32,
                         thinking_tokens: thinking as u32,
+                        raw: Some(u.clone()),
                     }
                 });
 
@@ -314,6 +315,7 @@ impl FormatParser for AnthropicParser {
                         cached_tokens: cached as u32,
                         cache_creation_input_tokens: cache_creation as u32,
                         thinking_tokens: 0,
+                        raw: Some(u.clone()),
                     }
                 });
 
@@ -470,6 +472,7 @@ impl FormatParser for AnthropicParser {
                     cached_tokens: cached as u32,
                     cache_creation_input_tokens: cache_creation as u32,
                     thinking_tokens: thinking as u32,
+                    raw: Some(u.clone()),
                 }
             })
             .unwrap_or(IrUsage {
@@ -479,6 +482,7 @@ impl FormatParser for AnthropicParser {
                 cached_tokens: 0,
                 cache_creation_input_tokens: 0,
                 thinking_tokens: 0,
+                raw: None,
             });
 
         let stop_sequence = body["stop_sequence"].as_str().map(String::from);

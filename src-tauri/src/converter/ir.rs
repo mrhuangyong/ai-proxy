@@ -162,6 +162,11 @@ pub struct IrUsage {
     pub cache_creation_input_tokens: u32,
     #[serde(default)]
     pub thinking_tokens: u32,
+    /// Raw upstream usage JSON (preserved verbatim for diagnostics).
+    /// Skipped during serialization to keep IR representations stable.
+    #[serde(skip)]
+    #[serde(default)]
+    pub raw: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

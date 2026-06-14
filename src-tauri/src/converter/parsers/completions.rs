@@ -338,6 +338,7 @@ impl FormatParser for CompletionsParser {
                     .unwrap_or(0) as u32,
                 cache_creation_input_tokens: 0,
                 thinking_tokens: 0,
+                raw: Some(u.clone()),
             }),
             error: None,
         }))
@@ -434,6 +435,7 @@ impl FormatParser for CompletionsParser {
                         .unwrap_or(0) as u32,
                     cache_creation_input_tokens: 0,
                     thinking_tokens: 0,
+                    raw: Some(u.clone()),
                 })
                 .unwrap_or(IrUsage {
                     prompt_tokens: 0,
@@ -442,6 +444,7 @@ impl FormatParser for CompletionsParser {
                     cached_tokens: 0,
                     cache_creation_input_tokens: 0,
                     thinking_tokens: 0,
+                    raw: None,
                 }),
         })
     }

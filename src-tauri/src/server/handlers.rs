@@ -248,6 +248,8 @@ async fn handle_proxy(
                 0,
                 0,
                 None,
+                None,
+                None,
             )
             .await
             {
@@ -396,6 +398,8 @@ async fn handle_proxy(
                 0,
                 0,
                 None,
+                None,
+                None,
             )
             .await
             {
@@ -470,6 +474,8 @@ async fn handle_proxy(
                 0,
                 0,
                 None,
+                None,
+                None,
             )
             .await
             {
@@ -497,6 +503,8 @@ async fn handle_proxy(
                     0,
                     0,
                     0,
+                    None,
+                    None,
                     None,
                 )
                 .await
@@ -526,6 +534,8 @@ async fn handle_proxy(
             0,
             0,
             None,
+            None,
+            None,
         )
         .await
         {
@@ -551,6 +561,8 @@ async fn handle_proxy(
                 0,
                 0,
                 0,
+                None,
+                None,
                 None,
             )
             .await
@@ -604,6 +616,8 @@ async fn handle_proxy(
                 0,
                 0,
                 0,
+                None,
+                None,
                 None,
             )
             .await
@@ -739,6 +753,8 @@ async fn handle_proxy(
                         0,
                         0,
                         None,
+                        None,
+                        None,
                     )
                     .await
                     {
@@ -820,6 +836,8 @@ async fn handle_proxy(
                 0,
                 0,
                 None,
+                None,
+                None,
             )
             .await
             {
@@ -877,6 +895,8 @@ async fn handle_proxy(
             0,
             0,
             0,
+            None,
+            None,
             None,
         )
         .await
@@ -972,6 +992,9 @@ async fn handle_proxy(
         let prompt_tokens = ir_response.usage.prompt_tokens as i64;
         let completion_tokens = ir_response.usage.completion_tokens as i64;
         let cached_tokens = ir_response.usage.cached_tokens as i64;
+        let final_usage_json = serde_json::to_string(&ir_response.usage).ok();
+        let upstream_usage_events_json = ir_response.usage.raw.as_ref()
+            .and_then(|raw| serde_json::to_string(&serde_json::Value::Array(vec![raw.clone()])).ok());
 
         // Cache reasoning_content for multi-turn (non-streaming path)
         if let Some(ref resp_id) = ir_response.id {
@@ -1006,6 +1029,8 @@ async fn handle_proxy(
             completion_tokens,
             cached_tokens,
             Some(start.elapsed().as_millis() as i64),
+            final_usage_json.as_deref(),
+            upstream_usage_events_json.as_deref(),
         )
         .await
         {
@@ -1045,6 +1070,8 @@ async fn handle_proxy(
             completion_tokens: AtomicU32::new(0),
             cached_tokens: AtomicU32::new(0),
             ttft_ms: Mutex::new(None),
+            usage_events: Mutex::new(Vec::new()),
+            final_usage: Mutex::new(None),
             logged: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
         });
@@ -1194,6 +1221,9 @@ async fn handle_proxy(
                         stream_state_ref.prompt_tokens.store(total_prompt, Ordering::SeqCst);
                         stream_state_ref.completion_tokens.store(total_completion, Ordering::SeqCst);
                         stream_state_ref.cached_tokens.store(total_cached, Ordering::SeqCst);
+                        if let Some(raw) = &usage.raw {
+                            stream_state_ref.usage_events.lock().unwrap().push(raw.clone());
+                        }
                     }
 
                     if ttft_ms.is_none() && (ir_chunk.delta_content.is_some() || ir_chunk.delta_tool_calls.is_some() || ir_chunk.delta_thinking.is_some()) {
@@ -2094,6 +2124,21 @@ async fn handle_proxy(
             let ct = total_completion as i64;
             let cache_t = total_cached as i64;
 
+            // Snapshot final usage and raw events for diagnostics storage.
+            let final_usage = serde_json::json!({
+                "prompt_tokens": total_prompt,
+                "completion_tokens": total_completion,
+                "cached_tokens": total_cached,
+            });
+            *stream_state_ref.final_usage.lock().unwrap() = Some(final_usage.clone());
+            let final_usage_json = serde_json::to_string(&final_usage).ok();
+            let events_vec = stream_state_ref.usage_events.lock().unwrap().clone();
+            let upstream_usage_events_json = if events_vec.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&serde_json::Value::Array(events_vec)).ok()
+            };
+
             stream_state_ref.logged.store(true, Ordering::SeqCst);
 
             if let Err(e) = log_request_entry(
@@ -2110,6 +2155,8 @@ async fn handle_proxy(
                 ct,
                 cache_t,
                 ttft_ms,
+                final_usage_json.as_deref(),
+                upstream_usage_events_json.as_deref(),
             )
             .await
             {
@@ -2404,6 +2451,8 @@ async fn log_request_entry(
     completion_tokens: i64,
     cached_tokens: i64,
     ttft_ms: Option<i64>,
+    final_usage_json: Option<&str>,
+    upstream_usage_events_json: Option<&str>,
 ) -> Result<(), ProxyError> {
     log_request(
         request_id,
@@ -2419,6 +2468,8 @@ async fn log_request_entry(
         completion_tokens,
         cached_tokens,
         ttft_ms,
+        final_usage_json,
+        upstream_usage_events_json,
     )
     .await
 }
@@ -2435,6 +2486,10 @@ struct StreamLogState {
     completion_tokens: AtomicU32,
     cached_tokens: AtomicU32,
     ttft_ms: Mutex<Option<i64>>,
+    /// Raw upstream usage events captured during streaming (in arrival order).
+    usage_events: Mutex<Vec<serde_json::Value>>,
+    /// Final accumulated upstream usage snapshot (set at stream end).
+    final_usage: Mutex<Option<serde_json::Value>>,
     logged: AtomicBool,
     interrupted: AtomicBool,
 }
@@ -2457,6 +2512,18 @@ impl Drop for StreamLoggingGuard {
             let cache_t = state.cached_tokens.load(Ordering::SeqCst) as i64;
             let elapsed = state.start.elapsed().as_millis() as i64;
             let ttft = *state.ttft_ms.lock().unwrap();
+            let events_vec = state.usage_events.lock().unwrap().clone();
+            let final_usage = serde_json::json!({
+                "prompt_tokens": pt,
+                "completion_tokens": ct,
+                "cached_tokens": cache_t,
+            });
+            let final_usage_json = serde_json::to_string(&final_usage).ok();
+            let upstream_usage_events_json = if events_vec.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&serde_json::Value::Array(events_vec)).ok()
+            };
 
             let (status_code, error_msg) = if interrupted {
                 (502, Some("stream interrupted".to_string()))
@@ -2478,6 +2545,8 @@ impl Drop for StreamLoggingGuard {
                 ct,
                 cache_t,
                 ttft,
+                final_usage_json.as_deref(),
+                upstream_usage_events_json.as_deref(),
             )
             .await
             {

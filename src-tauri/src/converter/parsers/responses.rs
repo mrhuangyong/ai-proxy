@@ -262,6 +262,7 @@ impl FormatParser for ResponsesParser {
                             .unwrap_or(0) as u32,
                         cache_creation_input_tokens: 0,
                         thinking_tokens: 0,
+                        raw: Some(u.clone()),
                     })
                 });
 
@@ -297,6 +298,7 @@ impl FormatParser for ResponsesParser {
                             .unwrap_or(0) as u32,
                         cache_creation_input_tokens: 0,
                         thinking_tokens: 0,
+                        raw: Some(u.clone()),
                     })
                 });
 
@@ -396,6 +398,7 @@ impl FormatParser for ResponsesParser {
                         .unwrap_or(0) as u32,
                     cache_creation_input_tokens: 0,
                     thinking_tokens: 0,
+                    raw: Some(u.clone()),
                 })
             })
             .unwrap_or(IrUsage {
@@ -405,6 +408,7 @@ impl FormatParser for ResponsesParser {
                 cached_tokens: 0,
                 cache_creation_input_tokens: 0,
                 thinking_tokens: 0,
+                raw: None,
             });
 
         Ok(IrResponse {

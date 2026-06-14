@@ -45,6 +45,8 @@ export interface RequestLog {
   ttft_ms: number | null
   error_message: string | null
   created_at: string
+  final_usage_json?: string | null
+  upstream_usage_events_json?: string | null
 }
 
 export interface UsageSummary {

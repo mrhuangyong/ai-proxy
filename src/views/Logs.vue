@@ -39,6 +39,18 @@
         @update:page-size="handlePageSizeChange"
       />
     </n-card>
+    <n-modal v-model:show="showUsageModal" preset="card" :title="usageModalTitle" style="width: 760px">
+      <n-tabs type="line" animated>
+        <n-tab-pane name="final" tab="最终 Usage">
+          <n-button size="small" style="margin-bottom: 8px" @click="copyText(finalUsagePretty)">复制</n-button>
+          <pre style="white-space: pre-wrap; word-break: break-all; margin: 0; font-family: 'SF Mono', Menlo, monospace; font-size: 12px; max-height: 50vh; overflow-y: auto">{{ finalUsagePretty || '(无数据)' }}</pre>
+        </n-tab-pane>
+        <n-tab-pane name="events" tab="上游事件 Usage">
+          <n-button size="small" style="margin-bottom: 8px" @click="copyText(upstreamEventsPretty)">复制</n-button>
+          <pre style="white-space: pre-wrap; word-break: break-all; margin: 0; font-family: 'SF Mono', Menlo, monospace; font-size: 12px; max-height: 50vh; overflow-y: auto">{{ upstreamEventsPretty || '(无数据)' }}</pre>
+        </n-tab-pane>
+      </n-tabs>
+    </n-modal>
     <n-modal v-model:show="showErrorModal" preset="card" title="错误详情" style="width: 600px">
       <div style="max-height: 50vh; overflow-y: auto">
         <pre style="white-space: pre-wrap; word-break: break-all; margin: 0; font-family: inherit; font-size: 14px;">{{ errorDetail }}</pre>
@@ -50,13 +62,52 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h } from 'vue'
 import { api } from '../api'
-import { NTag, NSpace, NTooltip, NModal, useDialog } from 'naive-ui'
+import { NTag, NSpace, NTooltip, NModal, NButton, NTabs, NTabPane, useDialog, useMessage } from 'naive-ui'
 import type { RequestLog } from '../types'
 
 const dialog = useDialog()
+const message = useMessage()
 
 const showErrorModal = ref(false)
 const errorDetail = ref('')
+
+const showUsageModal = ref(false)
+const usageModalTitle = ref('上游 Usage 详情')
+const finalUsageRaw = ref<string | null>(null)
+const upstreamEventsRaw = ref<string | null>(null)
+
+const finalUsagePretty = computed(() => {
+  if (!finalUsageRaw.value) return ''
+  try {
+    return JSON.stringify(JSON.parse(finalUsageRaw.value), null, 2)
+  } catch {
+    return finalUsageRaw.value
+  }
+})
+
+const upstreamEventsPretty = computed(() => {
+  if (!upstreamEventsRaw.value) return ''
+  try {
+    return JSON.stringify(JSON.parse(upstreamEventsRaw.value), null, 2)
+  } catch {
+    return upstreamEventsRaw.value
+  }
+})
+
+function copyText(text: string) {
+  if (!text) return
+  navigator.clipboard.writeText(text).then(
+    () => message.success('已复制'),
+    () => message.error('复制失败'),
+  )
+}
+
+function openUsageDetail(row: RequestLog) {
+  finalUsageRaw.value = row.final_usage_json ?? null
+  upstreamEventsRaw.value = row.upstream_usage_events_json ?? null
+  usageModalTitle.value = `上游 Usage - ${row.model} #${row.id}`
+  showUsageModal.value = true
+}
 
 const loading = ref(false)
 const logs = ref<RequestLog[]>([])
@@ -171,6 +222,21 @@ const columns = [
     width: 60,
     render: (row: RequestLog) =>
       h(NTag, { size: 'small', type: row.stream ? 'success' : 'default' }, () => (row.stream ? '是' : '否')),
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 80,
+    render: (row: RequestLog) =>
+      h(
+        NButton,
+        {
+          size: 'small',
+          quaternary: true,
+          onClick: () => openUsageDetail(row),
+        },
+        () => 'Usage',
+      ),
   },
 ]
 

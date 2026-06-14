@@ -206,6 +206,34 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 016: add enabled column to providers");
     }
 
+    // Migration 017: add extract_system_from_messages setting
+    let has_extract_system: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM settings WHERE key = 'extract_system_from_messages'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_extract_system {
+        let migration17 = include_str!("../../migrations/017_add_extract_system_from_messages.sql");
+        sqlx::query(migration17).execute(pool).await?;
+        info!("Applied migration 017: add extract_system_from_messages setting");
+    }
+
+    // Migration 018: add final_usage_json and upstream_usage_events_json columns to request_logs
+    let has_final_usage: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('request_logs') WHERE name = 'final_usage_json'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_final_usage {
+        let migration18 = include_str!("../../migrations/018_add_upstream_usage.sql");
+        sqlx::query(migration18).execute(pool).await?;
+        info!("Applied migration 018: add upstream usage columns to request_logs");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

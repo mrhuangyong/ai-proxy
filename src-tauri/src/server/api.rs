@@ -26,6 +26,7 @@ use crate::logging::store::log_request;
 use crate::provider::endpoint::Provider;
 use crate::provider::manager::ProviderManager;
 use crate::usage::pricing::PricingTable;
+use sqlx::Row;
 
 // --- Unified response types ---
 
@@ -224,6 +225,8 @@ struct LogEntry {
     ttft_ms: Option<i64>,
     error_message: Option<String>,
     created_at: String,
+    final_usage_json: Option<String>,
+    upstream_usage_events_json: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,7 +284,7 @@ async fn list_logs(
         }
     }
 
-    let select_cols = "id, request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at";
+    let select_cols = "id, request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json";
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -295,27 +298,7 @@ async fn list_logs(
     );
 
     let mut count_q = sqlx::query_as::<_, (i64,)>(&count_sql);
-    let mut data_q = sqlx::query_as::<
-        _,
-        (
-            i64,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i32,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            String,
-        ),
-    >(&data_sql);
+    let mut data_q = sqlx::query(&data_sql);
 
     for p in &params {
         count_q = count_q.bind(p);
@@ -334,45 +317,28 @@ async fn list_logs(
 
     let logs = rows
         .into_iter()
-        .map(
-            |(
-                id,
-                request_id,
-                client_format,
-                provider_name,
-                provider_format,
-                model,
-                stream,
-                status_code,
-                duration_ms,
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-                error_message,
-                cached_tokens,
-                ttft_ms,
-                created_at,
-            )| {
-                LogEntry {
-                    id,
-                    request_id,
-                    client_format,
-                    provider_name,
-                    provider_format,
-                    model,
-                    stream: stream != 0,
-                    status_code,
-                    duration_ms,
-                    prompt_tokens: prompt_tokens.unwrap_or(0),
-                    completion_tokens: completion_tokens.unwrap_or(0),
-                    total_tokens: total_tokens.unwrap_or(0),
-                    cached_tokens: cached_tokens.unwrap_or(0),
-                    ttft_ms,
-                    error_message,
-                    created_at,
-                }
-            },
-        )
+        .map(|row| {
+            LogEntry {
+                id: row.get(0),
+                request_id: row.get(1),
+                client_format: row.get(2),
+                provider_name: row.get(3),
+                provider_format: row.get(4),
+                model: row.get(5),
+                stream: row.get::<i32, _>(6) != 0,
+                status_code: row.get(7),
+                duration_ms: row.get(8),
+                prompt_tokens: row.get::<Option<i64>, _>(9).unwrap_or(0),
+                completion_tokens: row.get::<Option<i64>, _>(10).unwrap_or(0),
+                total_tokens: row.get::<Option<i64>, _>(11).unwrap_or(0),
+                error_message: row.get(12),
+                cached_tokens: row.get::<Option<i64>, _>(13).unwrap_or(0),
+                ttft_ms: row.get(14),
+                created_at: row.get(15),
+                final_usage_json: row.get(16),
+                upstream_usage_events_json: row.get(17),
+            }
+        })
         .collect();
 
     Ok(ok(LogList {
@@ -383,29 +349,31 @@ async fn list_logs(
 
 async fn get_log(Path(id): Path<i64>) -> Result<Json<ApiResponse<LogEntry>>, Json<ApiError>> {
     let pool = get_pool().await;
-    let row: (i64, String, String, String, String, String, i32, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<i64>, Option<i64>, String) = sqlx::query_as(
-        "SELECT id, request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at FROM request_logs WHERE id = ?",
+    let row = sqlx::query(
+        "SELECT id, request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json FROM request_logs WHERE id = ?",
     )
     .bind(id)
     .fetch_one(pool).await.map_err(|e| err_json(e.to_string()))?;
 
     Ok(ok(LogEntry {
-        id: row.0,
-        request_id: row.1,
-        client_format: row.2,
-        provider_name: row.3,
-        provider_format: row.4,
-        model: row.5,
-        stream: row.6 != 0,
-        status_code: row.7,
-        duration_ms: row.8,
-        prompt_tokens: row.9.unwrap_or(0),
-        completion_tokens: row.10.unwrap_or(0),
-        total_tokens: row.11.unwrap_or(0),
-        error_message: row.12,
-        cached_tokens: row.13.unwrap_or(0),
-        ttft_ms: row.14,
-        created_at: row.15,
+        id: row.get(0),
+        request_id: row.get(1),
+        client_format: row.get(2),
+        provider_name: row.get(3),
+        provider_format: row.get(4),
+        model: row.get(5),
+        stream: row.get::<i32, _>(6) != 0,
+        status_code: row.get(7),
+        duration_ms: row.get(8),
+        prompt_tokens: row.get::<Option<i64>, _>(9).unwrap_or(0),
+        completion_tokens: row.get::<Option<i64>, _>(10).unwrap_or(0),
+        total_tokens: row.get::<Option<i64>, _>(11).unwrap_or(0),
+        error_message: row.get(12),
+        cached_tokens: row.get::<Option<i64>, _>(13).unwrap_or(0),
+        ttft_ms: row.get(14),
+        created_at: row.get(15),
+        final_usage_json: row.get(16),
+        upstream_usage_events_json: row.get(17),
     }))
 }
 
@@ -1019,6 +987,8 @@ async fn test_model(
                 0,
                 0,
                 None,
+                None,
+                None,
             )
             .await;
             return Ok(ok(TestModelResult {
@@ -1062,6 +1032,8 @@ async fn test_model(
             0,
             0,
             0,
+            None,
+            None,
             None,
         )
         .await;
@@ -1113,6 +1085,8 @@ async fn test_model(
         0,
         0,
         0,
+        None,
+        None,
         None,
     )
     .await;

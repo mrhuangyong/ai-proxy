@@ -77,6 +77,7 @@ fn sample_ir_response() -> IrResponse {
             cached_tokens: 0,
             cache_creation_input_tokens: 0,
             thinking_tokens: 0,
+            raw: None,
         },
     }
 }
