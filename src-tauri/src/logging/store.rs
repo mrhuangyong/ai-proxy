@@ -17,7 +17,7 @@ pub async fn log_request(
     ttft_ms: Option<i64>,
 ) -> Result<(), ProxyError> {
     let pool = get_pool().await;
-    let total = prompt_tokens + completion_tokens + cached_tokens;
+    let total = prompt_tokens + completion_tokens;
 
     sqlx::query(
         "INSERT INTO request_logs (request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"

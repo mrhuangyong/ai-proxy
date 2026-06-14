@@ -1836,6 +1836,9 @@ async fn handle_proxy(
                                         "prompt_tokens": total_prompt,
                                         "completion_tokens": total_completion,
                                         "total_tokens": total_prompt + total_completion,
+                                        "prompt_tokens_details": {
+                                            "cached_tokens": total_cached,
+                                        }
                                     }
                                 });
                                 yield Ok::<_, std::convert::Infallible>(Bytes::from(
@@ -1916,6 +1919,9 @@ async fn handle_proxy(
                                                         "prompt_tokens": total_prompt,
                                                         "completion_tokens": total_completion,
                                                         "total_tokens": total_prompt + total_completion,
+                                                        "prompt_tokens_details": {
+                                                            "cached_tokens": total_cached,
+                                                        }
                                                     }
                                                 });
                                                 yield Ok::<_, std::convert::Infallible>(Bytes::from(

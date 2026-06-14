@@ -282,11 +282,17 @@ impl FormatGenerator for CompletionsGenerator {
         }
 
         if let Some(usage) = &chunk.usage {
-            chunk_data["usage"] = json!({
+            let mut usage_json = json!({
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
                 "total_tokens": usage.total_tokens,
             });
+            if usage.cached_tokens > 0 {
+                usage_json["prompt_tokens_details"] = json!({
+                    "cached_tokens": usage.cached_tokens,
+                });
+            }
+            chunk_data["usage"] = usage_json;
         }
 
         format!("data: {}\n\n", chunk_data)

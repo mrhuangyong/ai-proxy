@@ -148,9 +148,8 @@ const columns = [
     key: 'cache_hit',
     width: 80,
     render: (row: RequestLog) => {
-      const total = row.prompt_tokens + row.cached_tokens
-      if (total === 0) return '-'
-      const rate = row.cached_tokens / total * 100
+      if (row.prompt_tokens === 0) return '-'
+      const rate = row.cached_tokens / row.prompt_tokens * 100
       const type = rate >= 50 ? 'success' : rate > 0 ? 'warning' : 'default'
       return h(NTag, { size: 'small', type }, () => `${rate.toFixed(2)}%`)
     },
