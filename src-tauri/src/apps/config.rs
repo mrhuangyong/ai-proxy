@@ -255,6 +255,10 @@ pub async fn write_claude_cli_config(
             "ANTHROPIC_BASE_URL".to_string(),
             serde_json::Value::String(proxy_base.to_string()),
         );
+        env_obj.insert(
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+            serde_json::Value::String("1".to_string()),
+        );
         if !api_key.is_empty() {
             env_obj.insert(
                 "ANTHROPIC_API_KEY".to_string(),
