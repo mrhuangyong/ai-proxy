@@ -234,6 +234,20 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 018: add upstream usage columns to request_logs");
     }
 
+    // Migration 019: add upstream retry tracking columns to request_logs
+    let has_retry_count: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('request_logs') WHERE name = 'upstream_retry_count'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_retry_count {
+        let migration19 = include_str!("../../migrations/0019_add_retry_columns.sql");
+        sqlx::query(migration19).execute(pool).await?;
+        info!("Applied migration 019: upstream retry tracking columns");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }
