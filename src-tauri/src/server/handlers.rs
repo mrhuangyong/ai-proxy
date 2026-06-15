@@ -12,7 +12,9 @@ use axum::extract::{Path, Request};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures::stream::StreamExt;
+use futures::TryStreamExt;
 use serde_json::Value;
+#[allow(unused_imports)]
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
@@ -32,6 +34,7 @@ use crate::key::rotation::{KeyRotation, RotationStrategy};
 use crate::key::store::decrypt_api_key;
 use crate::logging::store::log_request;
 
+#[allow(dead_code)]
 fn parse_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -669,223 +672,123 @@ async fn handle_proxy(
 
     info!("Upstream request: {} {}", "POST", url);
 
-    let request_timeout_secs: u64 = {
-        let pool_ref = crate::db::pool::get_pool().await;
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT key, value FROM settings WHERE key = 'request_timeout'")
-                .fetch_all(pool_ref)
-                .await
-                .unwrap_or_default();
-        let map: HashMap<String, String> = rows.into_iter().collect();
-        map.get("request_timeout")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1200)
-    };
-
     let http_client = crate::http::SHARED_HTTP_CLIENT.clone();
-    let mut req_builder = http_client
-        .post(&url)
-        .json(&target_body)
-        .header("Content-Type", "application/json");
 
-    // Streaming: 24h max for long agent tasks. Non-streaming: 2h from DB.
-    if ir_request.stream {
-        req_builder = req_builder.timeout(std::time::Duration::from_secs(86400));
-    } else {
-        let timeout_secs = if request_timeout_secs < 7200 {
-            7200
-        } else {
-            request_timeout_secs
-        };
-        req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
-    }
+    // Load retry config from DB
+    let retry_config = crate::server::retry_session::load_config_from_db(client_format.clone()).await;
 
-    match route.target_format {
-        ClientFormat::Anthropic => {
-            req_builder = req_builder.header("x-api-key", &api_key);
-            req_builder = req_builder.header("anthropic-version", "2023-06-01");
+    // Build a request factory that re-injects the right auth header per attempt.
+    let url_clone = url.clone();
+    let target_body_clone = target_body.clone();
+    let extra_headers_clone = extra_headers.clone();
+    let target_format_clone = route.target_format.clone();
+    let http_client_clone = http_client.clone();
+    let is_stream_for_timeout = ir_request.stream;
+
+    // Decrypt all available keys for rotation
+    let mut decrypted_keys: Vec<String> = Vec::new();
+    decrypted_keys.push(api_key.clone());
+
+    let factory = move |key: &str| {
+        let client = http_client_clone.clone();
+        let url = url_clone.clone();
+        let body = target_body_clone.clone();
+        let extra = extra_headers_clone.clone();
+        let fmt = target_format_clone.clone();
+        let key_owned = key.to_string();
+        async move {
+            let mut b = client
+                .post(&url)
+                .json(&body)
+                .header("Content-Type", "application/json");
+            if is_stream_for_timeout {
+                b = b.timeout(std::time::Duration::from_secs(86400));
+            } else {
+                b = b.timeout(std::time::Duration::from_secs(7200));
+            }
+            match fmt {
+                ClientFormat::Anthropic => {
+                    b = b.header("x-api-key", &key_owned).header("anthropic-version", "2023-06-01");
+                }
+                _ => {
+                    b = b.bearer_auth(&key_owned);
+                }
+            }
+            for (k, v) in &extra {
+                b = b.header(k.as_str(), v.as_str());
+            }
+            b
         }
-        _ => {
-            req_builder = req_builder.bearer_auth(&api_key);
-        }
-    }
-
-    for (key, value) in &extra_headers {
-        req_builder = req_builder.header(key.as_str(), value.as_str());
-    }
-
-    let (retry_cfg_total_attempts, retry_cfg_base_ms) = {
-        let pool_ref = crate::db::pool::get_pool().await;
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT key, value FROM settings WHERE key IN ('upstream_max_retries', 'upstream_retry_backoff_base_ms')"
-        ).fetch_all(pool_ref).await.unwrap_or_default();
-        let map: HashMap<String, String> = rows.into_iter().collect();
-        let total_attempts = map
-            .get("upstream_max_retries")
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(10)
-            .max(1);
-        let base_ms = map
-            .get("upstream_retry_backoff_base_ms")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(500);
-        (total_attempts, base_ms)
     };
 
-    let mut last_error_response: Option<(reqwest::StatusCode, String)> = None;
-    let mut resp = None;
+    let session_outcome = crate::server::retry_session::run_upstream_session(
+        factory,
+        decrypted_keys,
+        retry_config,
+        route.target_format.clone(),
+    )
+    .await;
 
-    for attempt in 0..retry_cfg_total_attempts {
-        let send_result = req_builder
-            .try_clone()
-            .expect("http request builder must be clonable for retry")
-            .send()
-            .await;
-        let current_resp = match send_result {
-            Ok(r) => r,
-            Err(e) => {
-                let err_msg = format!("request to provider failed: {}", e);
-                tracing::error!(
-                    "[ERR] upstream network error model={} attempt={}: {}",
-                    target_model,
-                    attempt,
-                    e
-                );
-                if attempt + 1 == retry_cfg_total_attempts {
-                    let err = ProxyError::Network(err_msg.clone());
-                    if let Err(le) = log_request_entry(
-                        &request_id,
-                        &client_format,
-                        &route.provider_name,
-                        &route.target_format,
-                        &log_model,
-                        ir_request.stream,
-                        502,
-                        start.elapsed().as_millis() as i64,
-                        Some(&err_msg),
-                        0,
-                        0,
-                        0,
-                        None,
-                        None,
-                        None,
-                        0,
-                        None,
-                    )
-                    .await
-                    {
-                        tracing::error!("Network error logging failed: {}", le);
-                    }
-                    return err.into_response();
-                }
-                let wait_ms = retry_cfg_base_ms.saturating_mul(1u64 << attempt.min(6));
-                sleep(std::time::Duration::from_millis(wait_ms)).await;
-                continue;
-            }
-        };
+    use crate::server::retry_session::SessionOutcome;
 
-        let status = current_resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-            let status_code = status.as_u16();
-            let retry_after_secs = parse_retry_after_seconds(&current_resp.headers()).unwrap_or(0);
-            let resp_body = match current_resp.bytes().await {
-                Ok(b) => b,
-                Err(e) => {
-                    return ProxyError::Network(format!("failed to read error response: {}", e))
-                        .into_response();
-                }
-            };
-            let body_text = String::from_utf8_lossy(&resp_body).into_owned();
-            let err_msg = if body_text.trim_start().starts_with("<") {
-                extract_text_from_html(&body_text, 4000)
-            } else {
-                body_text
-            };
-            tracing::warn!(
-                "[RETRY] upstream rate/server error model={} attempt={} status={} body={}",
-                target_model,
-                attempt,
-                status_code,
-                truncate_str(&err_msg, 300)
-            );
-            last_error_response = Some((status, err_msg));
-            if attempt + 1 == retry_cfg_total_attempts {
-                break;
-            }
-            let wait_ms = if retry_after_secs > 0 {
-                retry_after_secs.saturating_mul(1000)
-            } else {
-                retry_cfg_base_ms.saturating_mul(1u64 << attempt.min(6))
-            };
-            sleep(std::time::Duration::from_millis(wait_ms)).await;
-            continue;
+    let (final_status, _retry_count_for_log, _last_error_for_log, body_or_stream): (reqwest::StatusCode, u32, Option<String>, EitherBody) = match session_outcome {
+        SessionOutcome::CompletedBuffer { status, bytes, retry_count } => {
+            (status, retry_count, None, EitherBody::Bytes(bytes))
         }
-
-        resp = Some(current_resp);
-        break;
-    }
-
-    let resp = match resp {
-        Some(r) => r,
-        None => {
-            let (status, err_msg) = last_error_response.unwrap_or((
-                reqwest::StatusCode::BAD_GATEWAY,
-                "upstream request failed after retries".to_string(),
-            ));
-            tracing::error!(
-                "[ERR] upstream status after retries={} model={}",
-                status.as_u16(),
-                target_model
-            );
-            error!("Upstream error {}: {}", status.as_u16(), err_msg);
+        SessionOutcome::StartedStreaming { status, buffered_bytes, remaining, retry_count } => {
+            (status, retry_count, None, EitherBody::Stream { buffered: buffered_bytes, remaining })
+        }
+        SessionOutcome::Exhausted { last_status, last_error, retry_count, partial_buffer } => {
+            let status = last_status.unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+            let err_msg = if partial_buffer.is_some() {
+                format!("upstream buffer cap exceeded after {} retries: {}", retry_count, last_error)
+            } else {
+                format!("upstream failed after {} retries: {}", retry_count, last_error)
+            };
             if let Err(le) = log_request_entry(
-                &request_id,
-                &client_format,
-                &route.provider_name,
-                &route.target_format,
-                &log_model,
-                ir_request.stream,
-                status.as_u16(),
-                start.elapsed().as_millis() as i64,
-                Some(&err_msg),
-                0,
-                0,
-                0,
-                None,
-                None,
-                None,
-                0,
-                None,
-            )
-            .await
-            {
-                tracing::error!("Upstream error logging failed: {}", le);
+                &request_id, &client_format, &route.provider_name, &route.target_format,
+                &log_model, ir_request.stream, status.as_u16(),
+                start.elapsed().as_millis() as i64, Some(&err_msg),
+                0, 0, 0, None, None, None,
+                retry_count as i64, Some(&last_error),
+            ).await {
+                tracing::error!("Upstream exhausted logging failed: {}", le);
             }
-
             let error_body = serde_json::json!({
-                "error": {
-                    "message": err_msg,
-                    "type": "upstream_error",
-                    "code": status.as_u16(),
-                }
+                "error": { "message": err_msg, "type": "upstream_error", "code": status.as_u16() }
             });
             let mut response = axum::Json(error_body).into_response();
             *response.status_mut() = status;
             return response;
         }
+        SessionOutcome::Fatal { status, body } => {
+            if let Err(le) = log_request_entry(
+                &request_id, &client_format, &route.provider_name, &route.target_format,
+                &log_model, ir_request.stream, status.as_u16(),
+                start.elapsed().as_millis() as i64, Some(&body),
+                0, 0, 0, None, None, None,
+                0, None,
+            ).await {
+                tracing::error!("Upstream fatal logging failed: {}", le);
+            }
+            let mut response = axum::Json(serde_json::json!({
+                "error": { "message": body, "type": "upstream_error", "code": status.as_u16() }
+            })).into_response();
+            *response.status_mut() = status;
+            return response;
+        }
     };
 
-    let status = resp.status();
+    let status = final_status;
     let is_stream = ir_request.stream;
 
+    // Defensive: SessionOutcome normally pre-returns on non-success / fatal /
+    // exhausted. If we somehow still have a non-success status, surface an error.
     if !status.is_success() {
         let status_code = status.as_u16();
-        let resp_body = match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                return ProxyError::Network(format!("failed to read error response: {}", e))
-                    .into_response();
-            }
+        let resp_body = match &body_or_stream {
+            EitherBody::Bytes(b) => b.clone(),
+            EitherBody::Stream { .. } => Vec::new(),
         };
         let body_text = String::from_utf8_lossy(&resp_body).into_owned();
         tracing::error!(
@@ -937,11 +840,15 @@ async fn handle_proxy(
     }
 
     if !is_stream {
-        let resp_body = match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                return ProxyError::Network(format!("failed to read response: {}", e))
-                    .into_response();
+        // Non-streaming: SessionOutcome::CompletedBuffer is the only path that
+        // reaches here for non-streaming requests. Extract bytes from EitherBody.
+        let resp_body = match body_or_stream {
+            EitherBody::Bytes(b) => b,
+            EitherBody::Stream { .. } => {
+                return ProxyError::Parse(
+                    "internal: stream body returned for non-streaming request".into(),
+                )
+                .into_response();
             }
         };
 
@@ -1074,7 +981,34 @@ async fn handle_proxy(
         let target_parser = get_parser(&route.target_format);
         let client_generator = get_generator(&client_format);
 
-        let stream = resp.bytes_stream();
+        // Build a unified byte stream from EitherBody.
+        // - StartedStreaming (pre_first_token mode): forward buffered bytes first,
+        //   then continue with the remaining upstream stream.
+        // - CompletedBuffer (full_buffer mode): replay the whole buffer as a single chunk.
+        let (buffered_bytes, remaining_stream) = match body_or_stream {
+            EitherBody::Bytes(b) => {
+                // full_buffer mode: replay the buffered bytes as a single chunk stream
+                let s = futures::stream::once(async move {
+                    Ok::<_, std::io::Error>(bytes::Bytes::from(b))
+                });
+                (Vec::new(), s.boxed())
+            }
+            EitherBody::Stream { buffered, remaining } => {
+                let remaining_mapped = remaining
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                (buffered, remaining_mapped.boxed())
+            }
+        };
+
+        let stream: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>> =
+            if buffered_bytes.is_empty() {
+                remaining_stream
+            } else {
+                let first = bytes::Bytes::from(buffered_bytes);
+                futures::stream::once(async move { Ok::<_, std::io::Error>(first) })
+                    .chain(remaining_stream)
+                    .boxed()
+            };
 
         let response_id = uuid::Uuid::new_v4().to_string();
         let model_name = ir_request.model.clone();
@@ -2748,6 +2682,17 @@ fn split_thinking_tags(text: &str) -> (Option<String>, String) {
         },
         remaining,
     )
+}
+
+/// Either a fully buffered byte response (non-streaming or full_buffer mode) or
+/// a streaming body that has already buffered some initial bytes before being
+/// handed off to the SSE forwarding loop.
+enum EitherBody {
+    Bytes(Vec<u8>),
+    Stream {
+        buffered: Vec<u8>,
+        remaining: futures::stream::BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>,
+    },
 }
 
 #[cfg(test)]
