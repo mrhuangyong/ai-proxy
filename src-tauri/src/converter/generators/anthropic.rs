@@ -460,10 +460,7 @@ impl FormatGenerator for AnthropicGenerator {
     }
 }
 
-fn flush_pending_tool_results(
-    pending: &mut Vec<(String, String)>,
-    messages: &mut Vec<Value>,
-) {
+fn flush_pending_tool_results(pending: &mut Vec<(String, String)>, messages: &mut Vec<Value>) {
     if pending.is_empty() {
         return;
     }

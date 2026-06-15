@@ -19,7 +19,11 @@ async fn exhausted_returns_exhausted_with_last_error() {
     let factory = move |_decrypted_key: &str| {
         let c = client.clone();
         let u = url.clone();
-        async move { c.post(&u).body("{}").header("content-type", "application/json") }
+        async move {
+            c.post(&u)
+                .body("{}")
+                .header("content-type", "application/json")
+        }
     };
 
     let outcome = run_upstream_session(
@@ -33,11 +37,17 @@ async fn exhausted_returns_exhausted_with_last_error() {
             buffer_limit_bytes: 1024,
         },
         ClientFormat::Anthropic,
+        true,
     )
     .await;
 
     match outcome {
-        SessionOutcome::Exhausted { retry_count, last_status, last_error, partial_buffer } => {
+        SessionOutcome::Exhausted {
+            retry_count,
+            last_status,
+            last_error,
+            partial_buffer,
+        } => {
             assert_eq!(retry_count, 2);
             assert_eq!(last_status, Some(reqwest::StatusCode::SERVICE_UNAVAILABLE));
             assert!(last_error.contains("503"));
@@ -62,7 +72,11 @@ async fn total_timeout_short_circuits() {
     let factory = move |_decrypted_key: &str| {
         let c = client.clone();
         let u = url.clone();
-        async move { c.post(&u).body("{}").header("content-type", "application/json") }
+        async move {
+            c.post(&u)
+                .body("{}")
+                .header("content-type", "application/json")
+        }
     };
 
     let outcome = run_upstream_session(
@@ -76,6 +90,7 @@ async fn total_timeout_short_circuits() {
             buffer_limit_bytes: 1024,
         },
         ClientFormat::Anthropic,
+        true,
     )
     .await;
 
@@ -115,7 +130,11 @@ async fn respects_retry_after_header() {
     let factory = move |_decrypted_key: &str| {
         let c = client.clone();
         let u = url.clone();
-        async move { c.post(&u).body("{}").header("content-type", "application/json") }
+        async move {
+            c.post(&u)
+                .body("{}")
+                .header("content-type", "application/json")
+        }
     };
 
     let outcome = run_upstream_session(
@@ -129,10 +148,18 @@ async fn respects_retry_after_header() {
             buffer_limit_bytes: 1024,
         },
         ClientFormat::Anthropic,
+        true,
     )
     .await;
 
     let elapsed = start.elapsed();
-    assert!(elapsed >= Duration::from_secs(2), "should have waited retry-after=2s, got {:?}", elapsed);
-    matches!(outcome, SessionOutcome::StartedStreaming { retry_count: 1, .. });
+    assert!(
+        elapsed >= Duration::from_secs(2),
+        "should have waited retry-after=2s, got {:?}",
+        elapsed
+    );
+    matches!(
+        outcome,
+        SessionOutcome::StartedStreaming { retry_count: 1, .. }
+    );
 }

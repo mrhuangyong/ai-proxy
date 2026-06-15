@@ -12,7 +12,9 @@ use futures::StreamExt;
 use tokio::time::sleep;
 
 use crate::converter::ir::ClientFormat;
-use crate::server::retry_invisible::{compute_backoff_ms, is_first_business_chunk, should_retry, BufferState, ErrKind, RetryMode};
+use crate::server::retry_invisible::{
+    compute_backoff_ms, is_first_business_chunk, should_retry, BufferState, ErrKind, RetryMode,
+};
 
 /// Check whether the buffered SSE bytes contain a proper stream termination signal
 /// (e.g. `[DONE]` for OpenAI/Responses, `message_stop` for Anthropic, or Gemini finish).
@@ -84,25 +86,42 @@ pub enum SessionOutcome {
 impl std::fmt::Debug for SessionOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::CompletedBuffer { status, bytes, retry_count } => f
+            Self::CompletedBuffer {
+                status,
+                bytes,
+                retry_count,
+            } => f
                 .debug_struct("CompletedBuffer")
                 .field("status", status)
                 .field("bytes_len", &bytes.len())
                 .field("retry_count", retry_count)
                 .finish(),
-            Self::StartedStreaming { status, buffered_bytes, remaining: _, retry_count } => f
+            Self::StartedStreaming {
+                status,
+                buffered_bytes,
+                remaining: _,
+                retry_count,
+            } => f
                 .debug_struct("StartedStreaming")
                 .field("status", status)
                 .field("buffered_bytes_len", &buffered_bytes.len())
                 .field("remaining", &"<BoxStream>")
                 .field("retry_count", retry_count)
                 .finish(),
-            Self::Exhausted { last_status, last_error, retry_count, partial_buffer } => f
+            Self::Exhausted {
+                last_status,
+                last_error,
+                retry_count,
+                partial_buffer,
+            } => f
                 .debug_struct("Exhausted")
                 .field("last_status", last_status)
                 .field("last_error", last_error)
                 .field("retry_count", retry_count)
-                .field("partial_buffer_len", &partial_buffer.as_ref().map(|b| b.len()))
+                .field(
+                    "partial_buffer_len",
+                    &partial_buffer.as_ref().map(|b| b.len()),
+                )
                 .finish(),
             Self::Fatal { status, body } => f
                 .debug_struct("Fatal")
@@ -161,7 +180,7 @@ pub async fn load_config_from_db(format: ClientFormat) -> RetryConfig {
             .get("upstream_invisible_retry_buffer_limit_mb")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(32))
-            .saturating_mul(1024 * 1024),
+        .saturating_mul(1024 * 1024),
     }
 }
 
@@ -171,12 +190,17 @@ pub async fn load_config_from_db(format: ClientFormat) -> RetryConfig {
 /// `RequestBuilder`. Called once per attempt — never reuse across attempts.
 /// `decrypted_keys`: pool of API keys to rotate through. Each retry advances
 /// to the next key (wraps around if fewer keys than attempts).
-/// `format`: client format, used for first-business-chunk detection.
+/// `client_format`: client format, used for first-business-chunk detection.
+/// `is_stream`: whether the upstream response is an SSE stream. When false,
+/// the response body is read in full on success and returned as
+/// `CompletedBuffer` without the SSE buffering loop — mid-body invisible
+/// retry is impossible for non-streaming responses.
 pub async fn run_upstream_session<F, Fut>(
     mut req_factory: F,
     decrypted_keys: Vec<String>,
     config: RetryConfig,
     client_format: ClientFormat,
+    is_stream: bool,
 ) -> SessionOutcome
 where
     F: FnMut(&str) -> Fut,
@@ -200,10 +224,7 @@ where
         if start.elapsed() >= config.total_timeout {
             return SessionOutcome::Exhausted {
                 last_status,
-                last_error: format!(
-                    "total timeout {}s exceeded",
-                    config.total_timeout.as_secs()
-                ),
+                last_error: format!("total timeout {}s exceeded", config.total_timeout.as_secs()),
                 retry_count: attempt,
                 partial_buffer: None,
             };
@@ -267,6 +288,64 @@ where
         }
 
         // 200 OK — enter buffer phase.
+        //
+        // Non-streaming: upstream returns a plain JSON body (not SSE). The
+        // SSE buffering loop below cannot detect completion for such a body
+        // (is_first_business_chunk relies on `data:` prefixes), so we read
+        // the full body here on success and return it as CompletedBuffer.
+        // Read failures are treated as connection-level errors and retried.
+        if !is_stream {
+            let bytes_result = tokio::time::timeout(
+                config.total_timeout.max(Duration::from_secs(1)),
+                resp.bytes(),
+            )
+            .await;
+            match bytes_result {
+                Ok(Ok(b)) => {
+                    return SessionOutcome::CompletedBuffer {
+                        status,
+                        bytes: b.to_vec(),
+                        retry_count: attempt,
+                    };
+                }
+                Ok(Err(e)) => {
+                    last_status = Some(status);
+                    last_error = format!("non-stream body read: {}", e);
+                    let state = current_buffer_state(config.mode, false);
+                    if !should_retry(None, Some(ErrKind::Network), state) {
+                        return SessionOutcome::Exhausted {
+                            last_status,
+                            last_error,
+                            retry_count: attempt,
+                            partial_buffer: None,
+                        };
+                    }
+                    let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                    sleep(Duration::from_millis(wait)).await;
+                    attempt += 1;
+                    continue;
+                }
+                Err(_) => {
+                    last_status = Some(status);
+                    last_error = "non-stream body read timeout".into();
+                    let state = current_buffer_state(config.mode, false);
+                    if !should_retry(None, Some(ErrKind::Network), state) {
+                        return SessionOutcome::Exhausted {
+                            last_status,
+                            last_error,
+                            retry_count: attempt,
+                            partial_buffer: None,
+                        };
+                    }
+                    let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                    sleep(Duration::from_millis(wait)).await;
+                    attempt += 1;
+                    continue;
+                }
+            }
+        }
+
+        // Streaming path.
         // Read SSE chunks until either:
         //   (a) we see a first-business-chunk -> transition to StartedStreaming
         //   (b) full_buffer mode and stream ends -> CompletedBuffer

@@ -259,6 +259,12 @@ pub async fn write_claude_cli_config(
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
             serde_json::Value::String("1".to_string()),
         );
+        // 关闭 Claude Code 的用量归因 header（cch 动态哈希会破坏 prompt cache 命中率），
+        // 国内模型用不到该归因，开启反而导致缓存几乎无法命中。
+        env_obj.insert(
+            "CLAUDE_CODE_ATTRIBUTION_HEADER".to_string(),
+            serde_json::Value::String("0".to_string()),
+        );
         if !api_key.is_empty() {
             env_obj.insert(
                 "ANTHROPIC_API_KEY".to_string(),

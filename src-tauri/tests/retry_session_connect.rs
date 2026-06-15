@@ -40,7 +40,11 @@ async fn connect_503_then_200_retries() {
     let factory = move |_decrypted_key: &str| {
         let c = client.clone();
         let u = url.clone();
-        async move { c.post(&u).body("{}").header("content-type", "application/json") }
+        async move {
+            c.post(&u)
+                .body("{}")
+                .header("content-type", "application/json")
+        }
     };
 
     let outcome = run_upstream_session(
@@ -48,12 +52,14 @@ async fn connect_503_then_200_retries() {
         vec!["test-key".to_string()],
         cfg(),
         ClientFormat::Anthropic,
+        true,
     )
     .await;
 
     match outcome {
         ai_proxy_lib::server::retry_session::SessionOutcome::StartedStreaming {
-            retry_count, ..
+            retry_count,
+            ..
         } => {
             assert_eq!(retry_count, 2);
         }
@@ -69,12 +75,10 @@ async fn pre_first_token_interruption_retries_invisibly() {
     // WITHOUT a content_block_delta. pre_first_token mode should retry.
     wiremock::Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(
-                b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
-                "text/event-stream",
-            ),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+            "text/event-stream",
+        ))
         .up_to_n_times(1)
         .mount(&server)
         .await;
@@ -94,7 +98,11 @@ async fn pre_first_token_interruption_retries_invisibly() {
     let factory = move |_decrypted_key: &str| {
         let c = client.clone();
         let u = url.clone();
-        async move { c.post(&u).body("{}").header("content-type", "application/json") }
+        async move {
+            c.post(&u)
+                .body("{}")
+                .header("content-type", "application/json")
+        }
     };
 
     let outcome = run_upstream_session(
@@ -108,12 +116,15 @@ async fn pre_first_token_interruption_retries_invisibly() {
             buffer_limit_bytes: 1024 * 1024,
         },
         ai_proxy_lib::converter::ir::ClientFormat::Anthropic,
+        true,
     )
     .await;
 
     match outcome {
         ai_proxy_lib::server::retry_session::SessionOutcome::StartedStreaming {
-            retry_count, buffered_bytes, ..
+            retry_count,
+            buffered_bytes,
+            ..
         } => {
             assert_eq!(retry_count, 1, "should have retried once");
             // buffered_bytes should include message_start from attempt 2
@@ -138,7 +149,11 @@ async fn full_buffer_collects_complete_stream() {
     let factory = move |_decrypted_key: &str| {
         let c = client.clone();
         let u = url.clone();
-        async move { c.post(&u).body("{}").header("content-type", "application/json") }
+        async move {
+            c.post(&u)
+                .body("{}")
+                .header("content-type", "application/json")
+        }
     };
 
     let outcome = run_upstream_session(
@@ -152,11 +167,16 @@ async fn full_buffer_collects_complete_stream() {
             buffer_limit_bytes: 1024 * 1024,
         },
         ai_proxy_lib::converter::ir::ClientFormat::Anthropic,
+        true,
     )
     .await;
 
     match outcome {
-        ai_proxy_lib::server::retry_session::SessionOutcome::CompletedBuffer { bytes, retry_count, .. } => {
+        ai_proxy_lib::server::retry_session::SessionOutcome::CompletedBuffer {
+            bytes,
+            retry_count,
+            ..
+        } => {
             assert_eq!(retry_count, 0);
             assert!(bytes.windows(6).any(|w| w == b"[DONE]"));
         }
@@ -194,7 +214,11 @@ async fn full_buffer_retries_on_midstream_interrupt() {
     let factory = move |_decrypted_key: &str| {
         let c = client.clone();
         let u = url.clone();
-        async move { c.post(&u).body("{}").header("content-type", "application/json") }
+        async move {
+            c.post(&u)
+                .body("{}")
+                .header("content-type", "application/json")
+        }
     };
 
     let outcome = run_upstream_session(
@@ -208,12 +232,15 @@ async fn full_buffer_retries_on_midstream_interrupt() {
             buffer_limit_bytes: 1024 * 1024,
         },
         ai_proxy_lib::converter::ir::ClientFormat::Anthropic,
+        true,
     )
     .await;
 
     match outcome {
         ai_proxy_lib::server::retry_session::SessionOutcome::CompletedBuffer {
-            bytes, retry_count, ..
+            bytes,
+            retry_count,
+            ..
         } => {
             assert_eq!(retry_count, 1);
             assert!(bytes.windows(6).any(|w| w == b"[DONE]"));

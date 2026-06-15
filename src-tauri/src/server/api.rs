@@ -317,27 +317,25 @@ async fn list_logs(
 
     let logs = rows
         .into_iter()
-        .map(|row| {
-            LogEntry {
-                id: row.get(0),
-                request_id: row.get(1),
-                client_format: row.get(2),
-                provider_name: row.get(3),
-                provider_format: row.get(4),
-                model: row.get(5),
-                stream: row.get::<i32, _>(6) != 0,
-                status_code: row.get(7),
-                duration_ms: row.get(8),
-                prompt_tokens: row.get::<Option<i64>, _>(9).unwrap_or(0),
-                completion_tokens: row.get::<Option<i64>, _>(10).unwrap_or(0),
-                total_tokens: row.get::<Option<i64>, _>(11).unwrap_or(0),
-                error_message: row.get(12),
-                cached_tokens: row.get::<Option<i64>, _>(13).unwrap_or(0),
-                ttft_ms: row.get(14),
-                created_at: row.get(15),
-                final_usage_json: row.get(16),
-                upstream_usage_events_json: row.get(17),
-            }
+        .map(|row| LogEntry {
+            id: row.get(0),
+            request_id: row.get(1),
+            client_format: row.get(2),
+            provider_name: row.get(3),
+            provider_format: row.get(4),
+            model: row.get(5),
+            stream: row.get::<i32, _>(6) != 0,
+            status_code: row.get(7),
+            duration_ms: row.get(8),
+            prompt_tokens: row.get::<Option<i64>, _>(9).unwrap_or(0),
+            completion_tokens: row.get::<Option<i64>, _>(10).unwrap_or(0),
+            total_tokens: row.get::<Option<i64>, _>(11).unwrap_or(0),
+            error_message: row.get(12),
+            cached_tokens: row.get::<Option<i64>, _>(13).unwrap_or(0),
+            ttft_ms: row.get(14),
+            created_at: row.get(15),
+            final_usage_json: row.get(16),
+            upstream_usage_events_json: row.get(17),
         })
         .collect();
 

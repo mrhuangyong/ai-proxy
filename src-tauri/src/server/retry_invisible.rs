@@ -103,8 +103,7 @@ pub fn is_first_business_chunk(format: &ClientFormat, line: &str) -> bool {
         .lines()
         .filter_map(|l| {
             let l = l.trim();
-            l.strip_prefix("data: ")
-                .or_else(|| l.strip_prefix("data:"))
+            l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))
         })
         .collect();
     if data_payloads.is_empty() {
@@ -162,8 +161,7 @@ fn matches_first_for_format(format: &ClientFormat, v: &serde_json::Value) -> boo
             let t = v["type"].as_str().unwrap_or("");
             matches!(
                 t,
-                "response.output_text.delta"
-                    | "response.function_call_arguments.delta"
+                "response.output_text.delta" | "response.function_call_arguments.delta"
             ) && (v.get("delta").is_some() || v.get("arguments").is_some())
         }
     }
@@ -234,10 +232,22 @@ mod tests {
 
     #[test]
     fn should_retry_network_error_in_buffer_state() {
-        assert!(should_retry(None, Some(ErrKind::Network), BufferState::PreFirstToken));
-        assert!(should_retry(None, Some(ErrKind::Network), BufferState::FullBuffer));
+        assert!(should_retry(
+            None,
+            Some(ErrKind::Network),
+            BufferState::PreFirstToken
+        ));
+        assert!(should_retry(
+            None,
+            Some(ErrKind::Network),
+            BufferState::FullBuffer
+        ));
         // Already transparent: can't retry
-        assert!(!should_retry(None, Some(ErrKind::Network), BufferState::Transparent));
+        assert!(!should_retry(
+            None,
+            Some(ErrKind::Network),
+            BufferState::Transparent
+        ));
     }
 
     #[test]
@@ -273,11 +283,23 @@ mod tests {
     #[test]
     fn should_retry_stream_midway_error_only_in_buffer_state() {
         // PreFirstToken: still in buffer, retry
-        assert!(should_retry(None, Some(ErrKind::StreamInterrupted), BufferState::PreFirstToken));
+        assert!(should_retry(
+            None,
+            Some(ErrKind::StreamInterrupted),
+            BufferState::PreFirstToken
+        ));
         // FullBuffer: still in buffer, retry
-        assert!(should_retry(None, Some(ErrKind::StreamInterrupted), BufferState::FullBuffer));
+        assert!(should_retry(
+            None,
+            Some(ErrKind::StreamInterrupted),
+            BufferState::FullBuffer
+        ));
         // Transparent: already emitted bytes, can't retry
-        assert!(!should_retry(None, Some(ErrKind::StreamInterrupted), BufferState::Transparent));
+        assert!(!should_retry(
+            None,
+            Some(ErrKind::StreamInterrupted),
+            BufferState::Transparent
+        ));
     }
 
     #[test]
@@ -291,7 +313,10 @@ mod tests {
         assert!(!is_first_business_chunk(&ClientFormat::Completions, line));
 
         // [DONE] -> not first
-        assert!(!is_first_business_chunk(&ClientFormat::Completions, "data: [DONE]"));
+        assert!(!is_first_business_chunk(
+            &ClientFormat::Completions,
+            "data: [DONE]"
+        ));
     }
 
     #[test]
@@ -328,7 +353,10 @@ data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}"#
 
     #[test]
     fn first_chunk_ignores_non_data_lines() {
-        assert!(!is_first_business_chunk(&ClientFormat::Completions, ": ping"));
+        assert!(!is_first_business_chunk(
+            &ClientFormat::Completions,
+            ": ping"
+        ));
         assert!(!is_first_business_chunk(&ClientFormat::Completions, ""));
     }
 

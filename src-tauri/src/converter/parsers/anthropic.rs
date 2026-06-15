@@ -269,7 +269,11 @@ impl FormatParser for AnthropicParser {
                         .get("output_tokens_details")
                         .and_then(|d| d["thinking_tokens"].as_u64())
                         .unwrap_or(0);
-                    let prompt = if cached > input { input + cached } else { input };
+                    let prompt = if cached > input {
+                        input + cached
+                    } else {
+                        input
+                    };
                     IrUsage {
                         prompt_tokens: prompt as u32,
                         completion_tokens: output as u32,
@@ -307,7 +311,11 @@ impl FormatParser for AnthropicParser {
                         .or_else(|| u["cached_tokens"].as_u64())
                         .unwrap_or(0);
                     let cache_creation = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-                    let prompt = if cached > input { input + cached } else { input };
+                    let prompt = if cached > input {
+                        input + cached
+                    } else {
+                        input
+                    };
                     IrUsage {
                         prompt_tokens: prompt as u32,
                         completion_tokens: 0,
@@ -464,7 +472,11 @@ impl FormatParser for AnthropicParser {
                     .get("output_tokens_details")
                     .and_then(|d| d["thinking_tokens"].as_u64())
                     .unwrap_or(0);
-                let prompt = if cached > input { input + cached } else { input };
+                let prompt = if cached > input {
+                    input + cached
+                } else {
+                    input
+                };
                 IrUsage {
                     prompt_tokens: prompt as u32,
                     completion_tokens: output as u32,

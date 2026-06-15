@@ -675,7 +675,8 @@ async fn handle_proxy(
     let http_client = crate::http::SHARED_HTTP_CLIENT.clone();
 
     // Load retry config from DB
-    let retry_config = crate::server::retry_session::load_config_from_db(client_format.clone()).await;
+    let retry_config =
+        crate::server::retry_session::load_config_from_db(client_format.clone()).await;
 
     // Build a request factory that re-injects the right auth header per attempt.
     let url_clone = url.clone();
@@ -687,8 +688,9 @@ async fn handle_proxy(
 
     // Decrypt all available keys for rotation
     let mut decrypted_keys: Vec<String> = Vec::new();
-    let all_keys =
-        crate::key::store::list_active_keys(&route.provider_id).await.unwrap_or_default();
+    let all_keys = crate::key::store::list_active_keys(&route.provider_id)
+        .await
+        .unwrap_or_default();
     for k in all_keys {
         // SelectedKey.nonce is Vec<u8>; decrypt_api_key expects &[u8; 12].
         if k.nonce.len() != 12 {
@@ -724,7 +726,9 @@ async fn handle_proxy(
             }
             match fmt {
                 ClientFormat::Anthropic => {
-                    b = b.header("x-api-key", &key_owned).header("anthropic-version", "2023-06-01");
+                    b = b
+                        .header("x-api-key", &key_owned)
+                        .header("anthropic-version", "2023-06-01");
                 }
                 _ => {
                     b = b.bearer_auth(&key_owned);
@@ -742,19 +746,43 @@ async fn handle_proxy(
         decrypted_keys,
         retry_config,
         route.target_format.clone(),
+        ir_request.stream,
     )
     .await;
 
     use crate::server::retry_session::SessionOutcome;
 
-    let (final_status, retry_count_for_log, last_error_for_log, body_or_stream): (reqwest::StatusCode, u32, Option<String>, EitherBody) = match session_outcome {
-        SessionOutcome::CompletedBuffer { status, bytes, retry_count } => {
-            (status, retry_count, None, EitherBody::Bytes(bytes))
-        }
-        SessionOutcome::StartedStreaming { status, buffered_bytes, remaining, retry_count } => {
-            (status, retry_count, None, EitherBody::Stream { buffered: buffered_bytes, remaining })
-        }
-        SessionOutcome::Exhausted { last_status, last_error, retry_count, partial_buffer } => {
+    let (final_status, retry_count_for_log, last_error_for_log, body_or_stream): (
+        reqwest::StatusCode,
+        u32,
+        Option<String>,
+        EitherBody,
+    ) = match session_outcome {
+        SessionOutcome::CompletedBuffer {
+            status,
+            bytes,
+            retry_count,
+        } => (status, retry_count, None, EitherBody::Bytes(bytes)),
+        SessionOutcome::StartedStreaming {
+            status,
+            buffered_bytes,
+            remaining,
+            retry_count,
+        } => (
+            status,
+            retry_count,
+            None,
+            EitherBody::Stream {
+                buffered: buffered_bytes,
+                remaining,
+            },
+        ),
+        SessionOutcome::Exhausted {
+            last_status,
+            last_error,
+            retry_count,
+            partial_buffer,
+        } => {
             // If we have buffered partial content on a stream request, replay it as SSE
             // with an error trailer so the client can still consume partial results.
             if let Some(ref buffered) = partial_buffer {
@@ -775,30 +803,65 @@ async fn handle_proxy(
                         axum::http::header::HeaderValue::from_static("text/event-stream"),
                     );
                     let _ = log_request_entry(
-                        &request_id, &client_format, &route.provider_name, &route.target_format,
-                        &log_model, ir_request.stream, 200,
+                        &request_id,
+                        &client_format,
+                        &route.provider_name,
+                        &route.target_format,
+                        &log_model,
+                        ir_request.stream,
+                        200,
                         start.elapsed().as_millis() as i64,
-                        Some(&format!("buffer cap hit, partial stream emitted after {} retries", retry_count)),
-                        0, 0, 0, None, None, None,
-                        retry_count as i64, Some(&last_error),
-                    ).await;
+                        Some(&format!(
+                            "buffer cap hit, partial stream emitted after {} retries",
+                            retry_count
+                        )),
+                        0,
+                        0,
+                        0,
+                        None,
+                        None,
+                        None,
+                        retry_count as i64,
+                        Some(&last_error),
+                    )
+                    .await;
                     return response;
                 }
             }
 
             let status = last_status.unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
             let err_msg = if partial_buffer.is_some() {
-                format!("upstream buffer cap exceeded after {} retries: {}", retry_count, last_error)
+                format!(
+                    "upstream buffer cap exceeded after {} retries: {}",
+                    retry_count, last_error
+                )
             } else {
-                format!("upstream failed after {} retries: {}", retry_count, last_error)
+                format!(
+                    "upstream failed after {} retries: {}",
+                    retry_count, last_error
+                )
             };
             if let Err(le) = log_request_entry(
-                &request_id, &client_format, &route.provider_name, &route.target_format,
-                &log_model, ir_request.stream, status.as_u16(),
-                start.elapsed().as_millis() as i64, Some(&err_msg),
-                0, 0, 0, None, None, None,
-                retry_count as i64, Some(&last_error),
-            ).await {
+                &request_id,
+                &client_format,
+                &route.provider_name,
+                &route.target_format,
+                &log_model,
+                ir_request.stream,
+                status.as_u16(),
+                start.elapsed().as_millis() as i64,
+                Some(&err_msg),
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                retry_count as i64,
+                Some(&last_error),
+            )
+            .await
+            {
                 tracing::error!("Upstream exhausted logging failed: {}", le);
             }
             let error_body = serde_json::json!({
@@ -810,17 +873,32 @@ async fn handle_proxy(
         }
         SessionOutcome::Fatal { status, body } => {
             if let Err(le) = log_request_entry(
-                &request_id, &client_format, &route.provider_name, &route.target_format,
-                &log_model, ir_request.stream, status.as_u16(),
-                start.elapsed().as_millis() as i64, Some(&body),
-                0, 0, 0, None, None, None,
-                0, None,
-            ).await {
+                &request_id,
+                &client_format,
+                &route.provider_name,
+                &route.target_format,
+                &log_model,
+                ir_request.stream,
+                status.as_u16(),
+                start.elapsed().as_millis() as i64,
+                Some(&body),
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                0,
+                None,
+            )
+            .await
+            {
                 tracing::error!("Upstream fatal logging failed: {}", le);
             }
             let mut response = axum::Json(serde_json::json!({
                 "error": { "message": body, "type": "upstream_error", "code": status.as_u16() }
-            })).into_response();
+            }))
+            .into_response();
             *response.status_mut() = status;
             return response;
         }
@@ -967,8 +1045,9 @@ async fn handle_proxy(
         let completion_tokens = ir_response.usage.completion_tokens as i64;
         let cached_tokens = ir_response.usage.cached_tokens as i64;
         let final_usage_json = serde_json::to_string(&ir_response.usage).ok();
-        let upstream_usage_events_json = ir_response.usage.raw.as_ref()
-            .and_then(|raw| serde_json::to_string(&serde_json::Value::Array(vec![raw.clone()])).ok());
+        let upstream_usage_events_json = ir_response.usage.raw.as_ref().and_then(|raw| {
+            serde_json::to_string(&serde_json::Value::Array(vec![raw.clone()])).ok()
+        });
 
         // Cache reasoning_content for multi-turn (non-streaming path)
         if let Some(ref resp_id) = ir_response.id {
@@ -1035,12 +1114,16 @@ async fn handle_proxy(
         let (buffered_bytes, remaining_stream) = match body_or_stream {
             EitherBody::Bytes(b) => {
                 // full_buffer mode: replay the buffered bytes as a single chunk stream
-                let s = futures::stream::once(async move {
-                    Ok::<_, std::io::Error>(bytes::Bytes::from(b))
-                });
+                let s =
+                    futures::stream::once(
+                        async move { Ok::<_, std::io::Error>(bytes::Bytes::from(b)) },
+                    );
                 (Vec::new(), s.boxed())
             }
-            EitherBody::Stream { buffered, remaining } => {
+            EitherBody::Stream {
+                buffered,
+                remaining,
+            } => {
                 let remaining_mapped = remaining
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
                 (buffered, remaining_mapped.boxed())
