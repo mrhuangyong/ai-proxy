@@ -64,6 +64,10 @@ impl LogBuffer {
     pub fn snapshot(&self) -> Vec<LogEntry> {
         self.entries.iter().cloned().collect()
     }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 struct StringVisitor {

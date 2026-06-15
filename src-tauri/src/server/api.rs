@@ -1201,6 +1201,13 @@ async fn get_runtime_logs(
     Ok(ok(entries))
 }
 
+async fn clear_runtime_logs() -> Result<Json<ApiResponse<serde_json::Value>>, Json<ApiError>> {
+    let layer = get_log_layer();
+    let buffer = layer.buffer();
+    buffer.lock().unwrap().clear();
+    Ok(ok(serde_json::json!({ "cleared": true })))
+}
+
 async fn runtime_logs_ws(ws: WebSocketUpgrade) -> axum::response::Response {
     ws.on_upgrade(handle_runtime_logs_ws)
 }
@@ -1249,7 +1256,10 @@ pub fn api_routes() -> axum::Router {
             "/settings",
             axum::routing::get(get_settings).put(update_settings),
         )
-        .route("/runtime-logs", axum::routing::get(get_runtime_logs))
+        .route(
+            "/runtime-logs",
+            axum::routing::get(get_runtime_logs).delete(clear_runtime_logs),
+        )
         .route("/runtime-logs/stream", axum::routing::get(runtime_logs_ws))
         .route(
             "/skills-marketplace/search",

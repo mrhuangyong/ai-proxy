@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, computed, watch } from 'vue'
 import { NTag, NButton, NButtonGroup, NSpace, NSwitch, NIcon, NEmpty } from 'naive-ui'
 import { PauseOutline, PlayOutline, TrashOutline } from '@vicons/ionicons5'
 import { api, getBaseUrl } from '../api'
@@ -30,6 +30,11 @@ const filteredLogs = computed(() => {
   return logs.value.filter(l => l.level === levelFilter.value)
 })
 
+// 由响应式系统统一驱动滚动，覆盖 onMounted 历史填充、WS 推送、filter 切换等场景
+watch(() => filteredLogs.value.length, () => {
+  if (autoScroll.value) scrollToBottom()
+})
+
 const levelColor = (level: string) => {
   switch (level) {
     case 'ERROR': return 'error'
@@ -55,13 +60,32 @@ function processEntry(raw: any): LogEntry {
 }
 
 function scrollToBottom() {
-  if (!autoScroll.value || !scroller.value) return
+  if (!autoScroll.value) return
   nextTick(() => {
-    if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+    const el = scroller.value
+    if (!el) {
+      // v-if 刚从空切非空，ref 尚未绑定，再等一帧
+      nextTick(() => {
+        if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+      })
+      return
+    }
+    el.scrollTop = el.scrollHeight
   })
 }
 
+// 用户向上浏览历史时自动暂停滚动，滚回底部附近自动恢复
+function onScroll() {
+  const el = scroller.value
+  if (!el) return
+  const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  autoScroll.value = distanceFromBottom < 40
+}
+
 function clearLogs() {
+  api('/api/runtime-logs', { method: 'DELETE' }).catch(() => {
+    // 后端清空失败仍清空前端（降级行为）
+  })
   logs.value = []
 }
 
@@ -80,7 +104,6 @@ function connectWs() {
       if (logs.value.length > 1000) {
         logs.value = logs.value.slice(-800)
       }
-      scrollToBottom()
     } catch {}
   }
 
@@ -106,7 +129,6 @@ onMounted(async () => {
   try {
     const history = await api<any[]>('/api/runtime-logs')
     logs.value = history.map(processEntry)
-    scrollToBottom()
   } catch {}
   connectWs()
 })
@@ -162,6 +184,7 @@ onUnmounted(() => {
       ref="scroller"
       class="terminal-bg log-scroller"
       style="flex: 1; padding: 8px 12px; overflow-y: auto;"
+      @scroll="onScroll"
     >
       <div v-for="log in filteredLogs" :key="log._uid" style="display: flex; gap: 8px; padding: 1px 0;">
         <n-tag :type="levelColor(log.level)" size="small" :bordered="false" style="min-width: 56px; justify-content: center; font-size: 11px;">
