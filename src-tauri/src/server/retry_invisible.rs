@@ -4,6 +4,9 @@
 //! backoff computation. The orchestration loop lives in `retry_session`.
 
 use reqwest::StatusCode;
+use serde_json;
+
+use crate::converter::ir::ClientFormat;
 
 /// Which buffer state an upstream session is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,89 @@ pub fn compute_backoff_ms(attempt: u32, base_ms: u64, retry_after_secs: Option<u
     }
     let shift = attempt.min(BACKOFF_SHIFT_CAP);
     base_ms.saturating_mul(1u64 << shift)
+}
+
+/// Returns true if the SSE line is the first "business" chunk — i.e., the
+/// first delta carrying actual content (text / thinking / tool call).
+///
+/// Lines that are SSE comments, empty, [DONE], or pure meta/handshake events
+/// return false. Used to decide when pre_first_token mode transitions to
+/// Transparent.
+pub fn is_first_business_chunk(format: ClientFormat, line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with(':') {
+        return false;
+    }
+    // Each SSE event may contain multiple lines (event:/data:). Find data lines.
+    let data_payloads: Vec<&str> = trimmed
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("data: ")
+                .or_else(|| l.strip_prefix("data:"))
+        })
+        .collect();
+    if data_payloads.is_empty() {
+        return false;
+    }
+    for raw in data_payloads {
+        let raw = raw.trim();
+        if raw == "[DONE]" {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if matches_first_for_format(&format, &v) {
+            return true;
+        }
+    }
+    false
+}
+
+fn matches_first_for_format(format: &ClientFormat, v: &serde_json::Value) -> bool {
+    match format {
+        ClientFormat::Completions => v["choices"]
+            .get(0)
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+            .map_or(false, |s| !s.is_empty()),
+        ClientFormat::Anthropic => {
+            // content_block_delta with text_delta / input_json_delta / thinking_delta
+            let t = v["type"].as_str().unwrap_or("");
+            if t == "content_block_delta" {
+                let dt = v["delta"]["type"].as_str().unwrap_or("");
+                return matches!(dt, "text_delta" | "input_json_delta" | "thinking_delta");
+            }
+            // content_block_start with non-empty content also counts
+            if t == "content_block_start" {
+                // tool_use start counts as first business byte
+                if v["content_block"]["type"].as_str() == Some("tool_use") {
+                    return true;
+                }
+            }
+            false
+        }
+        ClientFormat::Gemini => v["candidates"]
+            .get(0)
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.get(0))
+            .map_or(false, |part| {
+                part.get("text").is_some() || part.get("functionCall").is_some()
+            }),
+        ClientFormat::Responses => {
+            let t = v["type"].as_str().unwrap_or("");
+            matches!(
+                t,
+                "response.output_text.delta"
+                    | "response.output_item.done"
+                    | "response.function_call_arguments.delta"
+            ) && (v.get("delta").is_some() || v.get("arguments").is_some())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +256,57 @@ mod tests {
         assert!(should_retry(None, Some(ErrKind::StreamInterrupted), BufferState::FullBuffer));
         // Transparent: already emitted bytes, can't retry
         assert!(!should_retry(None, Some(ErrKind::StreamInterrupted), BufferState::Transparent));
+    }
+
+    #[test]
+    fn first_chunk_openai_completions() {
+        // delta with content -> first
+        let line = r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#;
+        assert!(is_first_business_chunk(ClientFormat::Completions, line));
+
+        // role-only delta -> NOT first
+        let line = r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#;
+        assert!(!is_first_business_chunk(ClientFormat::Completions, line));
+
+        // [DONE] -> not first
+        assert!(!is_first_business_chunk(ClientFormat::Completions, "data: [DONE]"));
+    }
+
+    #[test]
+    fn first_chunk_anthropic() {
+        // message_start is meta -> not first
+        let line = r#"event: message_start
+data: {"type":"message_start"}"#;
+        assert!(!is_first_business_chunk(ClientFormat::Anthropic, line));
+
+        // content_block_delta with text -> first
+        let line = r#"event: content_block_delta
+data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}"#;
+        assert!(is_first_business_chunk(ClientFormat::Anthropic, line));
+    }
+
+    #[test]
+    fn first_chunk_gemini() {
+        let line = r#"data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]}}]}"#;
+        assert!(is_first_business_chunk(ClientFormat::Gemini, line));
+
+        // empty candidates -> not first
+        let line = r#"data: {"candidates":[]}"#;
+        assert!(!is_first_business_chunk(ClientFormat::Gemini, line));
+    }
+
+    #[test]
+    fn first_chunk_responses() {
+        let line = r#"data: {"type":"response.output_text.delta","delta":"Hi"}"#;
+        assert!(is_first_business_chunk(ClientFormat::Responses, line));
+
+        let line = r#"data: {"type":"response.created"}"#;
+        assert!(!is_first_business_chunk(ClientFormat::Responses, line));
+    }
+
+    #[test]
+    fn first_chunk_ignores_non_data_lines() {
+        assert!(!is_first_business_chunk(ClientFormat::Completions, ": ping"));
+        assert!(!is_first_business_chunk(ClientFormat::Completions, ""));
     }
 }
