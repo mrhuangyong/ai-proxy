@@ -85,6 +85,6 @@ mod tests {
     #[test]
     fn backoff_saturates_on_overflow() {
         // Huge base shouldn't panic
-        let _ = compute_backoff_ms(50, u64::MAX, None);
+        assert_eq!(compute_backoff_ms(50, u64::MAX, None), u64::MAX);
     }
 }
