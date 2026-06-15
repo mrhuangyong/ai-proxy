@@ -8,9 +8,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use futures::StreamExt;
+use tokio::time::sleep;
 
 use crate::converter::ir::ClientFormat;
-use crate::server::retry_invisible::{BufferState, RetryMode};
+use crate::server::retry_invisible::{compute_backoff_ms, should_retry, BufferState, ErrKind, RetryMode};
 
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -145,5 +147,118 @@ pub async fn load_config_from_db(format: ClientFormat) -> RetryConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(32))
             .saturating_mul(1024 * 1024),
+    }
+}
+
+/// Run an upstream session with retry.
+///
+/// `req_factory`: closure that takes a decrypted API key and returns a fresh
+/// `RequestBuilder`. Called once per attempt — never reuse across attempts.
+/// `decrypted_keys`: pool of API keys to rotate through. Each retry advances
+/// to the next key (wraps around if fewer keys than attempts).
+/// `format`: client format, used for first-business-chunk detection.
+pub async fn run_upstream_session<F, Fut>(
+    mut req_factory: F,
+    decrypted_keys: Vec<String>,
+    config: RetryConfig,
+    _format: ClientFormat,
+) -> SessionOutcome
+where
+    F: FnMut(&str) -> Fut,
+    Fut: std::future::Future<Output = reqwest::RequestBuilder>,
+{
+    let start = std::time::Instant::now();
+    let n_keys = decrypted_keys.len().max(1);
+    let mut last_status: Option<reqwest::StatusCode> = None;
+    let mut last_error = String::new();
+    let mut attempt: u32 = 0;
+
+    loop {
+        if attempt >= config.max_attempts {
+            return SessionOutcome::Exhausted {
+                last_status,
+                last_error,
+                retry_count: attempt,
+                partial_buffer: None,
+            };
+        }
+        if start.elapsed() >= config.total_timeout {
+            return SessionOutcome::Exhausted {
+                last_status,
+                last_error: format!(
+                    "total timeout {}s exceeded",
+                    config.total_timeout.as_secs()
+                ),
+                retry_count: attempt,
+                partial_buffer: None,
+            };
+        }
+
+        let key = &decrypted_keys[(attempt as usize) % n_keys];
+        let builder = req_factory(key).await;
+        let send_result = builder.send().await;
+
+        let resp = match send_result {
+            Ok(r) => r,
+            Err(e) => {
+                last_status = None;
+                last_error = format!("network: {}", e);
+                let state = current_buffer_state(config.mode, false);
+                if !should_retry(None, Some(ErrKind::Network), state) {
+                    return SessionOutcome::Exhausted {
+                        last_status: None,
+                        last_error,
+                        retry_count: attempt,
+                        partial_buffer: None,
+                    };
+                }
+                let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                sleep(Duration::from_millis(wait)).await;
+                attempt += 1;
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            last_status = Some(status);
+            let retry_after_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            let body = resp.bytes().await.unwrap_or_default();
+            last_error = format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                String::from_utf8_lossy(&body)
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+            );
+            let wait = compute_backoff_ms(attempt, config.backoff_base_ms, retry_after_secs);
+            sleep(Duration::from_millis(wait)).await;
+            attempt += 1;
+            continue;
+        }
+
+        if !status.is_success() {
+            // 4xx (except 429): fatal
+            let body = resp.bytes().await.unwrap_or_default();
+            return SessionOutcome::Fatal {
+                status,
+                body: String::from_utf8_lossy(&body).into_owned(),
+            };
+        }
+
+        // 200 OK — stream phase. Task 12 will add buffer/retry logic.
+        // For now, immediately return StartedStreaming with empty buffer.
+        let remaining = resp.bytes_stream().boxed();
+        return SessionOutcome::StartedStreaming {
+            status,
+            buffered_bytes: Vec::new(),
+            remaining,
+            retry_count: attempt,
+        };
     }
 }
