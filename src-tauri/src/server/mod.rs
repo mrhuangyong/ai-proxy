@@ -1,6 +1,7 @@
 pub mod api;
 pub mod handlers;
 pub mod middleware;
+pub mod retry_invisible;
 pub mod router;
 
 use axum::Router;
