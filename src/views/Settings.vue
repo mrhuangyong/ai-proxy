@@ -71,6 +71,20 @@
             style="width: 100%"
           />
         </n-form-item>
+        <n-form-item label="中断重试模式">
+          <n-radio-group v-model:value="settings.upstreamInvisibleRetryMode">
+            <n-space>
+              <n-radio value="pre_first_token">首字节前（保留流式）</n-radio>
+              <n-radio value="full_buffer">完全缓冲（最稳，TTFT 长）</n-radio>
+            </n-space>
+          </n-radio-group>
+        </n-form-item>
+        <n-form-item label="重试总超时（秒）">
+          <n-input-number v-model:value="settings.upstreamInvisibleRetryTotalTimeoutSecs" :min="30" :max="3600" style="width: 100%" />
+        </n-form-item>
+        <n-form-item label="缓冲上限（MB，仅完全缓冲模式）">
+          <n-input-number v-model:value="settings.upstreamInvisibleRetryBufferLimitMb" :min="1" :max="256" style="width: 100%" />
+        </n-form-item>
         <n-form-item label="日志保留天数">
           <n-input-number
             v-model:value="settings.logRetentionDays"
@@ -155,6 +169,9 @@ interface AppSettings {
   proxyAuthKey: string
   upstreamMaxRetries: number
   upstreamRetryBackoffBaseMs: number
+  upstreamInvisibleRetryMode: string
+  upstreamInvisibleRetryTotalTimeoutSecs: number
+  upstreamInvisibleRetryBufferLimitMb: number
   extractSystemFromMessages: boolean
 }
 
@@ -167,6 +184,9 @@ const settings = ref<AppSettings>({
   proxyAuthKey: '',
   upstreamMaxRetries: 10,
   upstreamRetryBackoffBaseMs: 500,
+  upstreamInvisibleRetryMode: 'pre_first_token',
+  upstreamInvisibleRetryTotalTimeoutSecs: 600,
+  upstreamInvisibleRetryBufferLimitMb: 32,
   extractSystemFromMessages: true,
 })
 
@@ -203,6 +223,9 @@ async function loadSettings() {
       proxyAuthKey: data.proxy_auth_key,
       upstreamMaxRetries: parseInt((data as any).upstream_max_retries) || 10,
       upstreamRetryBackoffBaseMs: parseInt((data as any).upstream_retry_backoff_base_ms) || 500,
+      upstreamInvisibleRetryMode: (data as any).upstream_invisible_retry_mode || 'pre_first_token',
+      upstreamInvisibleRetryTotalTimeoutSecs: parseInt((data as any).upstream_invisible_retry_total_timeout_secs) || 600,
+      upstreamInvisibleRetryBufferLimitMb: parseInt((data as any).upstream_invisible_retry_buffer_limit_mb) || 32,
       extractSystemFromMessages: (data as any).extract_system_from_messages !== 'false',
     }
     savedNetworkConfig.value = {
@@ -233,6 +256,9 @@ async function handleSave() {
         proxy_auth_key: settings.value.proxyAuthKey,
         upstream_max_retries: String(settings.value.upstreamMaxRetries),
         upstream_retry_backoff_base_ms: String(settings.value.upstreamRetryBackoffBaseMs),
+        upstream_invisible_retry_mode: settings.value.upstreamInvisibleRetryMode,
+        upstream_invisible_retry_total_timeout_secs: String(settings.value.upstreamInvisibleRetryTotalTimeoutSecs),
+        upstream_invisible_retry_buffer_limit_mb: String(settings.value.upstreamInvisibleRetryBufferLimitMb),
         extract_system_from_messages: String(settings.value.extractSystemFromMessages),
       }),
     })
