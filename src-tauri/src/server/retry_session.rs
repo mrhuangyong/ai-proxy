@@ -14,6 +14,21 @@ use tokio::time::sleep;
 use crate::converter::ir::ClientFormat;
 use crate::server::retry_invisible::{compute_backoff_ms, is_first_business_chunk, should_retry, BufferState, ErrKind, RetryMode};
 
+/// Check whether the buffered SSE bytes contain a proper stream termination signal
+/// (e.g. `[DONE]` for OpenAI/Responses, `message_stop` for Anthropic, or Gemini finish).
+fn is_stream_complete(format: &ClientFormat, buffered: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(buffered);
+    // [DONE] is a universal SSE termination marker used across all formats
+    if text.contains("[DONE]") {
+        return true;
+    }
+    match format {
+        ClientFormat::Completions | ClientFormat::Responses => false, // [DONE] already checked
+        ClientFormat::Anthropic => text.contains("\"message_stop\""),
+        ClientFormat::Gemini => text.contains("\"finishReason\"") || text.contains("finishReason"),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     pub max_attempts: u32,
@@ -279,11 +294,20 @@ where
                 Ok(None) => {
                     // stream ended
                     if config.mode == RetryMode::FullBuffer {
-                        return SessionOutcome::CompletedBuffer {
-                            status,
-                            bytes: std::mem::take(&mut buffered),
-                            retry_count: attempt,
-                        };
+                        if is_stream_complete(&client_format, &buffered) {
+                            return SessionOutcome::CompletedBuffer {
+                                status,
+                                bytes: std::mem::take(&mut buffered),
+                                retry_count: attempt,
+                            };
+                        }
+                        // full_buffer: stream ended without completion signal — retry
+                        last_status = Some(status);
+                        last_error = "full_buffer stream ended without completion signal".into();
+                        let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                        sleep(Duration::from_millis(wait)).await;
+                        attempt += 1;
+                        break;
                     }
                     // pre_first_token: did we ever see a business chunk?
                     if hit_first_business {
