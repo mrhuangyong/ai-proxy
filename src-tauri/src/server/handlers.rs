@@ -731,7 +731,7 @@ async fn handle_proxy(
 
     use crate::server::retry_session::SessionOutcome;
 
-    let (final_status, _retry_count_for_log, _last_error_for_log, body_or_stream): (reqwest::StatusCode, u32, Option<String>, EitherBody) = match session_outcome {
+    let (final_status, retry_count_for_log, last_error_for_log, body_or_stream): (reqwest::StatusCode, u32, Option<String>, EitherBody) = match session_outcome {
         SessionOutcome::CompletedBuffer { status, bytes, retry_count } => {
             (status, retry_count, None, EitherBody::Bytes(bytes))
         }
@@ -958,8 +958,8 @@ async fn handle_proxy(
             Some(start.elapsed().as_millis() as i64),
             final_usage_json.as_deref(),
             upstream_usage_events_json.as_deref(),
-            0,
-            None,
+            retry_count_for_log as i64,
+            last_error_for_log.as_deref(),
         )
         .await
         {
@@ -1030,6 +1030,8 @@ async fn handle_proxy(
             final_usage: Mutex::new(None),
             logged: AtomicBool::new(false),
             interrupted: AtomicBool::new(false),
+            upstream_retry_count: retry_count_for_log as i64,
+            upstream_last_error: last_error_for_log.clone(),
         });
         let stream_state_ref = stream_state.clone();
 
@@ -2113,8 +2115,8 @@ async fn handle_proxy(
                 ttft_ms,
                 final_usage_json.as_deref(),
                 upstream_usage_events_json.as_deref(),
-                0,
-                None,
+                retry_count_for_log as i64,
+                last_error_for_log.as_deref(),
             )
             .await
             {
@@ -2454,6 +2456,8 @@ struct StreamLogState {
     final_usage: Mutex<Option<serde_json::Value>>,
     logged: AtomicBool,
     interrupted: AtomicBool,
+    upstream_retry_count: i64,
+    upstream_last_error: Option<String>,
 }
 
 struct StreamLoggingGuard {
@@ -2509,8 +2513,8 @@ impl Drop for StreamLoggingGuard {
                 ttft,
                 final_usage_json.as_deref(),
                 upstream_usage_events_json.as_deref(),
-                0,
-                None,
+                state.upstream_retry_count,
+                state.upstream_last_error.as_deref(),
             )
             .await
             {
