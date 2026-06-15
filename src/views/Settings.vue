@@ -82,7 +82,7 @@
         <n-form-item label="重试总超时（秒）">
           <n-input-number v-model:value="settings.upstreamInvisibleRetryTotalTimeoutSecs" :min="30" :max="3600" style="width: 100%" />
         </n-form-item>
-        <n-form-item label="缓冲上限（MB，仅完全缓冲模式）">
+        <n-form-item v-if="settings.upstreamInvisibleRetryMode === 'full_buffer'" label="缓冲上限（MB，仅完全缓冲模式）">
           <n-input-number v-model:value="settings.upstreamInvisibleRetryBufferLimitMb" :min="1" :max="256" style="width: 100%" />
         </n-form-item>
         <n-form-item label="日志保留天数">
@@ -213,6 +213,12 @@ async function loadSettings() {
       record_request_body: string
       proxy_auth_enabled: string
       proxy_auth_key: string
+      upstream_max_retries: string
+      upstream_retry_backoff_base_ms: string
+      upstream_invisible_retry_mode: string
+      upstream_invisible_retry_total_timeout_secs: string
+      upstream_invisible_retry_buffer_limit_mb: string
+      extract_system_from_messages: string
     }>('/api/settings')
     settings.value = {
       port: parseInt(data.http_port) || 7860,
@@ -221,12 +227,12 @@ async function loadSettings() {
       logRetentionDays: parseInt(data.log_retention_days) || 30,
       recordRequestBody: data.record_request_body === 'true',
       proxyAuthKey: data.proxy_auth_key,
-      upstreamMaxRetries: parseInt((data as any).upstream_max_retries) || 10,
-      upstreamRetryBackoffBaseMs: parseInt((data as any).upstream_retry_backoff_base_ms) || 500,
-      upstreamInvisibleRetryMode: (data as any).upstream_invisible_retry_mode || 'pre_first_token',
-      upstreamInvisibleRetryTotalTimeoutSecs: parseInt((data as any).upstream_invisible_retry_total_timeout_secs) || 600,
-      upstreamInvisibleRetryBufferLimitMb: parseInt((data as any).upstream_invisible_retry_buffer_limit_mb) || 32,
-      extractSystemFromMessages: (data as any).extract_system_from_messages !== 'false',
+      upstreamMaxRetries: parseInt(data.upstream_max_retries) || 10,
+      upstreamRetryBackoffBaseMs: parseInt(data.upstream_retry_backoff_base_ms) || 500,
+      upstreamInvisibleRetryMode: data.upstream_invisible_retry_mode || 'pre_first_token',
+      upstreamInvisibleRetryTotalTimeoutSecs: parseInt(data.upstream_invisible_retry_total_timeout_secs) || 600,
+      upstreamInvisibleRetryBufferLimitMb: parseInt(data.upstream_invisible_retry_buffer_limit_mb) || 32,
+      extractSystemFromMessages: data.extract_system_from_messages !== 'false',
     }
     savedNetworkConfig.value = {
       port: settings.value.port,
