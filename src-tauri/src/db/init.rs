@@ -243,7 +243,7 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
     .unwrap_or(false);
 
     if !has_retry_count {
-        let migration19 = include_str!("../../migrations/0019_add_retry_columns.sql");
+        let migration19 = include_str!("../../migrations/019_add_retry_columns.sql");
         sqlx::query(migration19).execute(pool).await?;
         info!("Applied migration 019: upstream retry tracking columns");
     }
