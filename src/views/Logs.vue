@@ -62,7 +62,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h } from 'vue'
 import { api } from '../api'
-import { NTag, NSpace, NTooltip, NModal, NButton, NTabs, NTabPane, useDialog, useMessage } from 'naive-ui'
+import { NTag, NSpace, NTooltip, NModal, NTabs, NTabPane, useDialog, useMessage } from 'naive-ui'
 import type { RequestLog } from '../types'
 
 const dialog = useDialog()
@@ -197,12 +197,35 @@ const columns = [
   {
     title: '命中',
     key: 'cache_hit',
-    width: 80,
+    width: 90,
     render: (row: RequestLog) => {
-      if (row.prompt_tokens === 0) return '-'
-      const rate = row.cached_tokens / row.prompt_tokens * 100
-      const type = rate >= 50 ? 'success' : rate > 0 ? 'warning' : 'default'
-      return h(NTag, { size: 'small', type }, () => `${rate.toFixed(2)}%`)
+      let label: string
+      let type: 'success' | 'warning' | 'default' = 'default'
+      if (row.prompt_tokens === 0) {
+        label = '查看'
+      } else {
+        const rate = row.cached_tokens / row.prompt_tokens * 100
+        label = `${rate.toFixed(2)}%`
+        type = rate >= 50 ? 'success' : rate > 0 ? 'warning' : 'default'
+      }
+      return h(
+        NTooltip,
+        { trigger: 'hover' },
+        {
+          trigger: () =>
+            h(
+              NTag,
+              {
+                size: 'small',
+                type,
+                style: 'cursor: pointer',
+                onClick: () => openUsageDetail(row),
+              },
+              () => label,
+            ),
+          default: () => '点击查看 Usage 详情',
+        },
+      )
     },
   },
   { title: '输出', key: 'completion_tokens', width: 100, render: (row: RequestLog) => formatNumber(row.completion_tokens) },
@@ -222,21 +245,6 @@ const columns = [
     width: 60,
     render: (row: RequestLog) =>
       h(NTag, { size: 'small', type: row.stream ? 'success' : 'default' }, () => (row.stream ? '是' : '否')),
-  },
-  {
-    title: '操作',
-    key: 'actions',
-    width: 80,
-    render: (row: RequestLog) =>
-      h(
-        NButton,
-        {
-          size: 'small',
-          quaternary: true,
-          onClick: () => openUsageDetail(row),
-        },
-        () => 'Usage',
-      ),
   },
 ]
 
