@@ -169,6 +169,29 @@ fn matches_first_for_format(format: &ClientFormat, v: &serde_json::Value) -> boo
     }
 }
 
+/// Generate a downstream-format SSE error trailer. Used when buffer cap is hit
+/// mid-stream and we must close the downstream connection with an explicit error.
+pub fn error_trailer_event(format: ClientFormat, message: &str) -> String {
+    let safe = message.replace('"', "\\\"").replace('\n', " ");
+    match format {
+        ClientFormat::Anthropic => {
+            format!(
+                "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"overloaded_error\",\"message\":\"{}\"}}}}\n\n",
+                safe
+            )
+        }
+        ClientFormat::Completions | ClientFormat::Responses => {
+            format!(
+                "data: {{\"error\":{{\"message\":\"{}\",\"type\":\"server_error\"}}}}\n\n",
+                safe
+            )
+        }
+        ClientFormat::Gemini => {
+            format!(": error: {}\n\n", safe)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +330,27 @@ data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}"#
     fn first_chunk_ignores_non_data_lines() {
         assert!(!is_first_business_chunk(&ClientFormat::Completions, ": ping"));
         assert!(!is_first_business_chunk(&ClientFormat::Completions, ""));
+    }
+
+    #[test]
+    fn error_trailer_anthropic_format() {
+        let s = error_trailer_event(ClientFormat::Anthropic, "retry exhausted");
+        assert!(s.contains("event: error"));
+        assert!(s.contains("\"type\":\"overloaded_error\""));
+        assert!(s.contains("retry exhausted"));
+    }
+
+    #[test]
+    fn error_trailer_openai_format() {
+        let s = error_trailer_event(ClientFormat::Completions, "retry exhausted");
+        assert!(s.starts_with("data: "));
+        assert!(s.contains("\"type\":\"server_error\""));
+        assert!(s.contains("retry exhausted"));
+    }
+
+    #[test]
+    fn error_trailer_gemini_uses_comment() {
+        let s = error_trailer_event(ClientFormat::Gemini, "retry exhausted");
+        assert!(s.starts_with(": error"));
     }
 }
