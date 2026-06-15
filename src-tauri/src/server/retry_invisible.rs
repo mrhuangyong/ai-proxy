@@ -93,7 +93,7 @@ pub fn compute_backoff_ms(attempt: u32, base_ms: u64, retry_after_secs: Option<u
 /// Lines that are SSE comments, empty, [DONE], or pure meta/handshake events
 /// return false. Used to decide when pre_first_token mode transitions to
 /// Transparent.
-pub fn is_first_business_chunk(format: ClientFormat, line: &str) -> bool {
+pub fn is_first_business_chunk(format: &ClientFormat, line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with(':') {
         return false;
@@ -119,7 +119,7 @@ pub fn is_first_business_chunk(format: ClientFormat, line: &str) -> bool {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if matches_first_for_format(&format, &v) {
+        if matches_first_for_format(format, &v) {
             return true;
         }
     }
@@ -261,14 +261,14 @@ mod tests {
     fn first_chunk_openai_completions() {
         // delta with content -> first
         let line = r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#;
-        assert!(is_first_business_chunk(ClientFormat::Completions, line));
+        assert!(is_first_business_chunk(&ClientFormat::Completions, line));
 
         // role-only delta -> NOT first
         let line = r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#;
-        assert!(!is_first_business_chunk(ClientFormat::Completions, line));
+        assert!(!is_first_business_chunk(&ClientFormat::Completions, line));
 
         // [DONE] -> not first
-        assert!(!is_first_business_chunk(ClientFormat::Completions, "data: [DONE]"));
+        assert!(!is_first_business_chunk(&ClientFormat::Completions, "data: [DONE]"));
     }
 
     #[test]
@@ -276,36 +276,36 @@ mod tests {
         // message_start is meta -> not first
         let line = r#"event: message_start
 data: {"type":"message_start"}"#;
-        assert!(!is_first_business_chunk(ClientFormat::Anthropic, line));
+        assert!(!is_first_business_chunk(&ClientFormat::Anthropic, line));
 
         // content_block_delta with text -> first
         let line = r#"event: content_block_delta
 data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}"#;
-        assert!(is_first_business_chunk(ClientFormat::Anthropic, line));
+        assert!(is_first_business_chunk(&ClientFormat::Anthropic, line));
     }
 
     #[test]
     fn first_chunk_gemini() {
         let line = r#"data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]}}]}"#;
-        assert!(is_first_business_chunk(ClientFormat::Gemini, line));
+        assert!(is_first_business_chunk(&ClientFormat::Gemini, line));
 
         // empty candidates -> not first
         let line = r#"data: {"candidates":[]}"#;
-        assert!(!is_first_business_chunk(ClientFormat::Gemini, line));
+        assert!(!is_first_business_chunk(&ClientFormat::Gemini, line));
     }
 
     #[test]
     fn first_chunk_responses() {
         let line = r#"data: {"type":"response.output_text.delta","delta":"Hi"}"#;
-        assert!(is_first_business_chunk(ClientFormat::Responses, line));
+        assert!(is_first_business_chunk(&ClientFormat::Responses, line));
 
         let line = r#"data: {"type":"response.created"}"#;
-        assert!(!is_first_business_chunk(ClientFormat::Responses, line));
+        assert!(!is_first_business_chunk(&ClientFormat::Responses, line));
     }
 
     #[test]
     fn first_chunk_ignores_non_data_lines() {
-        assert!(!is_first_business_chunk(ClientFormat::Completions, ": ping"));
-        assert!(!is_first_business_chunk(ClientFormat::Completions, ""));
+        assert!(!is_first_business_chunk(&ClientFormat::Completions, ": ping"));
+        assert!(!is_first_business_chunk(&ClientFormat::Completions, ""));
     }
 }

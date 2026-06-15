@@ -12,7 +12,7 @@ use futures::StreamExt;
 use tokio::time::sleep;
 
 use crate::converter::ir::ClientFormat;
-use crate::server::retry_invisible::{compute_backoff_ms, should_retry, BufferState, ErrKind, RetryMode};
+use crate::server::retry_invisible::{compute_backoff_ms, is_first_business_chunk, should_retry, BufferState, ErrKind, RetryMode};
 
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -161,7 +161,7 @@ pub async fn run_upstream_session<F, Fut>(
     mut req_factory: F,
     decrypted_keys: Vec<String>,
     config: RetryConfig,
-    _format: ClientFormat,
+    client_format: ClientFormat,
 ) -> SessionOutcome
 where
     F: FnMut(&str) -> Fut,
@@ -251,14 +251,110 @@ where
             };
         }
 
-        // 200 OK — stream phase. Task 12 will add buffer/retry logic.
-        // For now, immediately return StartedStreaming with empty buffer.
-        let remaining = resp.bytes_stream().boxed();
-        return SessionOutcome::StartedStreaming {
-            status,
-            buffered_bytes: Vec::new(),
-            remaining,
-            retry_count: attempt,
-        };
+        // 200 OK — enter buffer phase.
+        // Read SSE chunks until either:
+        //   (a) we see a first-business-chunk -> transition to StartedStreaming
+        //   (b) full_buffer mode and stream ends -> CompletedBuffer
+        //   (c) stream errors / stalls mid-buffer -> retry
+        //   (d) buffer hits size cap -> Exhausted with partial
+        let mut buffered: Vec<u8> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        let mut buffered_lines: Vec<String> = Vec::new(); // for is_first_business_chunk inspection
+        let mut line_buf: Vec<u8> = Vec::new();
+        let mut hit_first_business = false;
+
+        loop {
+            let chunk_opt = tokio::time::timeout(Duration::from_secs(600), stream.next()).await;
+            let chunk = match chunk_opt {
+                Ok(Some(Ok(c))) => c,
+                Ok(Some(Err(_e))) => {
+                    // mid-stream error — retry only if still in buffer state
+                    last_status = Some(status);
+                    last_error = "upstream stream error".into();
+                    let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                    sleep(Duration::from_millis(wait)).await;
+                    attempt += 1;
+                    break; // outer loop continues
+                }
+                Ok(None) => {
+                    // stream ended
+                    if config.mode == RetryMode::FullBuffer {
+                        return SessionOutcome::CompletedBuffer {
+                            status,
+                            bytes: std::mem::take(&mut buffered),
+                            retry_count: attempt,
+                        };
+                    }
+                    // pre_first_token: did we ever see a business chunk?
+                    if hit_first_business {
+                        // impossible: would have transitioned already
+                        return SessionOutcome::CompletedBuffer {
+                            status,
+                            bytes: std::mem::take(&mut buffered),
+                            retry_count: attempt,
+                        };
+                    }
+                    // stream ended without any business chunk — suspicious interruption
+                    last_status = Some(status);
+                    last_error = "stream ended before any business chunk".into();
+                    let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                    sleep(Duration::from_millis(wait)).await;
+                    attempt += 1;
+                    break;
+                }
+                Err(_) => {
+                    // stall timeout — same handling as stream error
+                    last_status = Some(status);
+                    last_error = "upstream stall".into();
+                    let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                    sleep(Duration::from_millis(wait)).await;
+                    attempt += 1;
+                    break;
+                }
+            };
+
+            // append to buffer
+            if buffered.len() + chunk.len() > config.buffer_limit_bytes {
+                // buffer cap exceeded
+                return SessionOutcome::Exhausted {
+                    last_status: Some(status),
+                    last_error: format!("buffer cap {} bytes exceeded", config.buffer_limit_bytes),
+                    retry_count: attempt,
+                    partial_buffer: Some(buffered),
+                };
+            }
+            buffered.extend_from_slice(&chunk);
+
+            // scan chunk for newlines, build complete lines, test for first business
+            line_buf.extend_from_slice(&chunk);
+            while let Some(nl) = line_buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = line_buf[..nl].to_vec();
+                line_buf = line_buf[nl + 1..].to_vec();
+                let line = String::from_utf8_lossy(&line_bytes).into_owned();
+                // accumulate multi-line SSE event for inspection
+                if !line.is_empty() {
+                    buffered_lines.push(line.clone());
+                } else {
+                    // empty line == event boundary. Inspect accumulated event.
+                    if !buffered_lines.is_empty() {
+                        let event_text = buffered_lines.join("\n");
+                        if is_first_business_chunk(&client_format, &event_text) {
+                            hit_first_business = true;
+                            if config.mode == RetryMode::PreFirstToken {
+                                // transition: yield remaining stream
+                                return SessionOutcome::StartedStreaming {
+                                    status,
+                                    buffered_bytes: std::mem::take(&mut buffered),
+                                    remaining: stream.boxed(),
+                                    retry_count: attempt,
+                                };
+                            }
+                        }
+                        buffered_lines.clear();
+                    }
+                }
+            }
+        }
+        // outer continue — next attempt
     }
 }
