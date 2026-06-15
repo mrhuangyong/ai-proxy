@@ -92,3 +92,40 @@ pub fn decrypt_api_key(encrypted: &[u8], nonce: &[u8; NONCE_SIZE]) -> Result<Str
     String::from_utf8(decrypted)
         .map_err(|e| ProxyError::KeyManagement(format!("UTF-8 decode error: {}", e)))
 }
+
+/// Re-export of `SelectedKey` so callers using `key::store` don't need to reach into rotation.
+pub use crate::key::rotation::SelectedKey;
+
+/// Load all active API keys for a given provider, without mutating usage counters.
+///
+/// Used by the proxy retry path to gather every available key for rotation
+/// across upstream attempts. Decryption is intentionally left to the caller
+/// so this function can stay a thin read query.
+pub async fn list_active_keys(provider_id: &str) -> Result<Vec<SelectedKey>, ProxyError> {
+    use sqlx::FromRow;
+
+    #[derive(FromRow)]
+    struct DbApiKey {
+        id: String,
+        encrypted_key: Vec<u8>,
+        nonce: Vec<u8>,
+    }
+
+    let pool = crate::db::get_pool().await;
+    let rows: Vec<DbApiKey> = sqlx::query_as(
+        "SELECT id, encrypted_key, nonce FROM api_keys WHERE provider_id = ? AND is_active = 1",
+    )
+    .bind(provider_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ProxyError::KeyManagement(e.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| SelectedKey {
+            key_id: r.id,
+            encrypted_key: r.encrypted_key,
+            nonce: r.nonce,
+        })
+        .collect())
+}

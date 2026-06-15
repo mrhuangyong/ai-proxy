@@ -687,7 +687,23 @@ async fn handle_proxy(
 
     // Decrypt all available keys for rotation
     let mut decrypted_keys: Vec<String> = Vec::new();
-    decrypted_keys.push(api_key.clone());
+    let all_keys =
+        crate::key::store::list_active_keys(&route.provider_id).await.unwrap_or_default();
+    for k in all_keys {
+        // SelectedKey.nonce is Vec<u8>; decrypt_api_key expects &[u8; 12].
+        if k.nonce.len() != 12 {
+            continue;
+        }
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr.copy_from_slice(&k.nonce);
+        if let Ok(d) = decrypt_api_key(&k.encrypted_key, &nonce_arr) {
+            decrypted_keys.push(d);
+        }
+    }
+    if decrypted_keys.is_empty() {
+        // fallback: legacy single-key path (uses the already-resolved selected_key)
+        decrypted_keys.push(api_key.clone());
+    }
 
     let factory = move |key: &str| {
         let client = http_client_clone.clone();
