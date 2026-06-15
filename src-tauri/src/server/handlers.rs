@@ -739,6 +739,37 @@ async fn handle_proxy(
             (status, retry_count, None, EitherBody::Stream { buffered: buffered_bytes, remaining })
         }
         SessionOutcome::Exhausted { last_status, last_error, retry_count, partial_buffer } => {
+            // If we have buffered partial content on a stream request, replay it as SSE
+            // with an error trailer so the client can still consume partial results.
+            if let Some(ref buffered) = partial_buffer {
+                if ir_request.stream {
+                    let trailer = crate::server::retry_invisible::error_trailer_event(
+                        client_format.clone(),
+                        &format!("upstream buffer cap exceeded after {} retries", retry_count),
+                    );
+                    let body_stream = futures::stream::iter(vec![
+                        Ok::<_, std::io::Error>(bytes::Bytes::from(buffered.clone())),
+                        Ok(bytes::Bytes::from(trailer)),
+                    ]);
+                    let body = axum::body::Body::from_stream(body_stream);
+                    let mut response = axum::response::Response::new(body);
+                    *response.status_mut() = axum::http::StatusCode::OK;
+                    response.headers_mut().insert(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::header::HeaderValue::from_static("text/event-stream"),
+                    );
+                    let _ = log_request_entry(
+                        &request_id, &client_format, &route.provider_name, &route.target_format,
+                        &log_model, ir_request.stream, 200,
+                        start.elapsed().as_millis() as i64,
+                        Some(&format!("buffer cap hit, partial stream emitted after {} retries", retry_count)),
+                        0, 0, 0, None, None, None,
+                        retry_count as i64, Some(&last_error),
+                    ).await;
+                    return response;
+                }
+            }
+
             let status = last_status.unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
             let err_msg = if partial_buffer.is_some() {
                 format!("upstream buffer cap exceeded after {} retries: {}", retry_count, last_error)
