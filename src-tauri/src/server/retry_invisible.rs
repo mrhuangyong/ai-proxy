@@ -3,6 +3,8 @@
 //! Pure functions for error classification, first-token detection, and
 //! backoff computation. The orchestration loop lives in `retry_session`.
 
+use reqwest::StatusCode;
+
 /// Which buffer state an upstream session is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferState {
@@ -13,6 +15,40 @@ pub enum BufferState {
     /// Already emitted at least one business byte to downstream —
     /// interruption now is visible and cannot be retried.
     Transparent,
+}
+
+/// Categorized upstream error for retry decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrKind {
+    /// reqwest::Error (connect / TLS / timeout / body read)
+    Network,
+    /// Stream returned Err mid-flight, or upstream stall timeout
+    StreamInterrupted,
+}
+
+/// Decide whether to retry given the current state.
+///
+/// `status`: HTTP status if we got headers; `None` for network-level failures
+/// `err_kind`: classified error kind if no HTTP status; `None` if we have status
+/// `state`: current buffer state — Transparent never retries
+pub fn should_retry(
+    status: Option<StatusCode>,
+    err_kind: Option<ErrKind>,
+    state: BufferState,
+) -> bool {
+    if state == BufferState::Transparent {
+        return false;
+    }
+    if let Some(s) = status {
+        if s == StatusCode::TOO_MANY_REQUESTS || s.is_server_error() {
+            return true;
+        }
+        return false;
+    }
+    match err_kind {
+        Some(ErrKind::Network) | Some(ErrKind::StreamInterrupted) => true,
+        None => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,5 +122,53 @@ mod tests {
     fn backoff_saturates_on_overflow() {
         // Huge base shouldn't panic
         assert_eq!(compute_backoff_ms(50, u64::MAX, None), u64::MAX);
+    }
+
+    #[test]
+    fn should_retry_network_error_in_buffer_state() {
+        assert!(should_retry(None, Some(ErrKind::Network), BufferState::PreFirstToken));
+        assert!(should_retry(None, Some(ErrKind::Network), BufferState::FullBuffer));
+        // Already transparent: can't retry
+        assert!(!should_retry(None, Some(ErrKind::Network), BufferState::Transparent));
+    }
+
+    #[test]
+    fn should_retry_429_and_5xx() {
+        for code in [429, 500, 502, 503, 504] {
+            assert!(
+                should_retry(
+                    Some(StatusCode::from_u16(code).unwrap()),
+                    None,
+                    BufferState::PreFirstToken
+                ),
+                "code {} should retry",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn should_not_retry_4xx_other_than_429() {
+        for code in [400, 401, 403, 404, 422] {
+            assert!(
+                !should_retry(
+                    Some(StatusCode::from_u16(code).unwrap()),
+                    None,
+                    BufferState::PreFirstToken
+                ),
+                "code {} should NOT retry",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn should_retry_stream_midway_error_only_in_buffer_state() {
+        // PreFirstToken: still in buffer, retry
+        assert!(should_retry(None, Some(ErrKind::StreamInterrupted), BufferState::PreFirstToken));
+        // FullBuffer: still in buffer, retry
+        assert!(should_retry(None, Some(ErrKind::StreamInterrupted), BufferState::FullBuffer));
+        // Transparent: already emitted bytes, can't retry
+        assert!(!should_retry(None, Some(ErrKind::StreamInterrupted), BufferState::Transparent));
     }
 }
