@@ -703,12 +703,15 @@ struct Settings {
     connect_timeout: String,
     codex_preserve_auth: String,
     extract_system_from_messages: String,
+    upstream_invisible_retry_mode: String,
+    upstream_invisible_retry_total_timeout_secs: String,
+    upstream_invisible_retry_buffer_limit_mb: String,
 }
 
 async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
     let pool = get_pool().await;
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT key, value FROM settings WHERE key IN ('http_port', 'log_retention_days', 'record_request_body', 'proxy_auth_enabled', 'proxy_auth_key', 'request_timeout', 'connect_timeout', 'codex_preserve_auth', 'upstream_max_retries', 'upstream_retry_backoff_base_ms', 'extract_system_from_messages')"
+        "SELECT key, value FROM settings WHERE key IN ('http_port', 'log_retention_days', 'record_request_body', 'proxy_auth_enabled', 'proxy_auth_key', 'request_timeout', 'connect_timeout', 'codex_preserve_auth', 'upstream_max_retries', 'upstream_retry_backoff_base_ms', 'extract_system_from_messages', 'upstream_invisible_retry_mode', 'upstream_invisible_retry_total_timeout_secs', 'upstream_invisible_retry_buffer_limit_mb')"
     ).fetch_all(pool).await.map_err(|e| err_json(e.to_string()))?;
 
     let map: HashMap<String, String> = rows.into_iter().collect();
@@ -754,6 +757,18 @@ async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
             .get("extract_system_from_messages")
             .cloned()
             .unwrap_or_else(|| "true".into()),
+        upstream_invisible_retry_mode: map
+            .get("upstream_invisible_retry_mode")
+            .cloned()
+            .unwrap_or_else(|| "pre_first_token".into()),
+        upstream_invisible_retry_total_timeout_secs: map
+            .get("upstream_invisible_retry_total_timeout_secs")
+            .cloned()
+            .unwrap_or_else(|| "600".into()),
+        upstream_invisible_retry_buffer_limit_mb: map
+            .get("upstream_invisible_retry_buffer_limit_mb")
+            .cloned()
+            .unwrap_or_else(|| "32".into()),
     }))
 }
 
@@ -770,6 +785,9 @@ struct UpdateSettingsBody {
     connect_timeout: Option<String>,
     codex_preserve_auth: Option<String>,
     extract_system_from_messages: Option<String>,
+    upstream_invisible_retry_mode: Option<String>,
+    upstream_invisible_retry_total_timeout_secs: Option<String>,
+    upstream_invisible_retry_buffer_limit_mb: Option<String>,
 }
 
 async fn update_settings(
@@ -793,6 +811,18 @@ async fn update_settings(
         (
             "extract_system_from_messages",
             body.extract_system_from_messages,
+        ),
+        (
+            "upstream_invisible_retry_mode",
+            body.upstream_invisible_retry_mode,
+        ),
+        (
+            "upstream_invisible_retry_total_timeout_secs",
+            body.upstream_invisible_retry_total_timeout_secs,
+        ),
+        (
+            "upstream_invisible_retry_buffer_limit_mb",
+            body.upstream_invisible_retry_buffer_limit_mb,
         ),
     ];
     for (key, value) in updates {
