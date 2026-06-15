@@ -3,9 +3,6 @@
 //! Pure functions for error classification, first-token detection, and
 //! backoff computation. The orchestration loop lives in `retry_session`.
 
-use crate::converter::ir::ClientFormat;
-use reqwest::StatusCode;
-
 /// Which buffer state an upstream session is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferState {
