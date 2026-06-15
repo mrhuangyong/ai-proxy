@@ -163,7 +163,6 @@ fn matches_first_for_format(format: &ClientFormat, v: &serde_json::Value) -> boo
             matches!(
                 t,
                 "response.output_text.delta"
-                    | "response.output_item.done"
                     | "response.function_call_arguments.delta"
             ) && (v.get("delta").is_some() || v.get("arguments").is_some())
         }
