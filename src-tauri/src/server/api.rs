@@ -989,6 +989,8 @@ async fn test_model(
                 None,
                 None,
                 None,
+                0,
+                None,
             )
             .await;
             return Ok(ok(TestModelResult {
@@ -1034,6 +1036,8 @@ async fn test_model(
             0,
             None,
             None,
+            None,
+            0,
             None,
         )
         .await;
@@ -1087,6 +1091,8 @@ async fn test_model(
         0,
         None,
         None,
+        None,
+        0,
         None,
     )
     .await;

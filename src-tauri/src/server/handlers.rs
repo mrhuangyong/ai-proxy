@@ -250,6 +250,8 @@ async fn handle_proxy(
                 None,
                 None,
                 None,
+                0,
+                None,
             )
             .await
             {
@@ -400,6 +402,8 @@ async fn handle_proxy(
                 None,
                 None,
                 None,
+                0,
+                None,
             )
             .await
             {
@@ -476,6 +480,8 @@ async fn handle_proxy(
                 None,
                 None,
                 None,
+                0,
+                None,
             )
             .await
             {
@@ -505,6 +511,8 @@ async fn handle_proxy(
                     0,
                     None,
                     None,
+                    None,
+                    0,
                     None,
                 )
                 .await
@@ -536,6 +544,8 @@ async fn handle_proxy(
             None,
             None,
             None,
+            0,
+            None,
         )
         .await
         {
@@ -563,6 +573,8 @@ async fn handle_proxy(
                 0,
                 None,
                 None,
+                None,
+                0,
                 None,
             )
             .await
@@ -618,6 +630,8 @@ async fn handle_proxy(
                 0,
                 None,
                 None,
+                None,
+                0,
                 None,
             )
             .await
@@ -755,6 +769,8 @@ async fn handle_proxy(
                         None,
                         None,
                         None,
+                        0,
+                        None,
                     )
                     .await
                     {
@@ -838,6 +854,8 @@ async fn handle_proxy(
                 None,
                 None,
                 None,
+                0,
+                None,
             )
             .await
             {
@@ -897,6 +915,8 @@ async fn handle_proxy(
             0,
             None,
             None,
+            None,
+            0,
             None,
         )
         .await
@@ -1031,6 +1051,8 @@ async fn handle_proxy(
             Some(start.elapsed().as_millis() as i64),
             final_usage_json.as_deref(),
             upstream_usage_events_json.as_deref(),
+            0,
+            None,
         )
         .await
         {
@@ -2157,6 +2179,8 @@ async fn handle_proxy(
                 ttft_ms,
                 final_usage_json.as_deref(),
                 upstream_usage_events_json.as_deref(),
+                0,
+                None,
             )
             .await
             {
@@ -2453,6 +2477,8 @@ async fn log_request_entry(
     ttft_ms: Option<i64>,
     final_usage_json: Option<&str>,
     upstream_usage_events_json: Option<&str>,
+    upstream_retry_count: i64,
+    upstream_last_error: Option<&str>,
 ) -> Result<(), ProxyError> {
     log_request(
         request_id,
@@ -2470,6 +2496,8 @@ async fn log_request_entry(
         ttft_ms,
         final_usage_json,
         upstream_usage_events_json,
+        upstream_retry_count,
+        upstream_last_error,
     )
     .await
 }
@@ -2547,6 +2575,8 @@ impl Drop for StreamLoggingGuard {
                 ttft,
                 final_usage_json.as_deref(),
                 upstream_usage_events_json.as_deref(),
+                0,
+                None,
             )
             .await
             {

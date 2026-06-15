@@ -17,12 +17,14 @@ pub async fn log_request(
     ttft_ms: Option<i64>,
     final_usage_json: Option<&str>,
     upstream_usage_events_json: Option<&str>,
+    upstream_retry_count: i64,
+    upstream_last_error: Option<&str>,
 ) -> Result<(), ProxyError> {
     let pool = get_pool().await;
     let total = prompt_tokens + completion_tokens;
 
     sqlx::query(
-        "INSERT INTO request_logs (request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, final_usage_json, upstream_usage_events_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO request_logs (request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, final_usage_json, upstream_usage_events_json, upstream_retry_count, upstream_last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(request_id)
     .bind(client_format)
@@ -40,6 +42,8 @@ pub async fn log_request(
     .bind(ttft_ms)
     .bind(final_usage_json)
     .bind(upstream_usage_events_json)
+    .bind(upstream_retry_count)
+    .bind(upstream_last_error)
     .execute(pool)
     .await?;
 
