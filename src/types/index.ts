@@ -35,6 +35,7 @@ export interface RequestLog {
   provider_name: string
   provider_format: string
   model: string
+  target_model: string
   stream: boolean
   status_code: number | null
   duration_ms: number | null
@@ -51,6 +52,7 @@ export interface RequestLog {
 
 export interface UsageSummary {
   model: string
+  target_model: string
   provider_name: string
   total_prompt_tokens: number
   total_completion_tokens: number

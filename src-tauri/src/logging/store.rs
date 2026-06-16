@@ -7,6 +7,7 @@ pub async fn log_request(
     provider_name: &str,
     provider_format: &str,
     model: &str,
+    target_model: &str,
     stream: bool,
     status_code: u16,
     duration_ms: i64,
@@ -24,13 +25,14 @@ pub async fn log_request(
     let total = prompt_tokens + completion_tokens;
 
     sqlx::query(
-        "INSERT INTO request_logs (request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, final_usage_json, upstream_usage_events_json, upstream_retry_count, upstream_last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO request_logs (request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, final_usage_json, upstream_usage_events_json, upstream_retry_count, upstream_last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(request_id)
     .bind(client_format)
     .bind(provider_name)
     .bind(provider_format)
     .bind(model)
+    .bind(target_model)
     .bind(stream as i64)
     .bind(status_code as i64)
     .bind(duration_ms)

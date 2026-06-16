@@ -248,6 +248,31 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 019: upstream retry tracking columns");
     }
 
+    // Migration 020: split request_logs.model into model + target_model
+    let has_target_model: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('request_logs') WHERE name = 'target_model'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_target_model {
+        let migration20 = include_str!("../../migrations/020_add_target_model.sql");
+        // Strip comment lines first, then split on ';' and run each non-empty statement.
+        let stripped: String = migration20
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await?;
+            }
+        }
+        info!("Applied migration 020: split model into model + target_model");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

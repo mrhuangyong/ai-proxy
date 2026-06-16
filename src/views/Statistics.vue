@@ -51,6 +51,7 @@ const { isDark } = useTheme()
 
 interface UsageStat {
   model: string
+  target_model: string
   provider_name: string
   prompt_tokens: number
   completion_tokens: number
@@ -81,7 +82,16 @@ function formatTokens(n: number): string {
 }
 
 const summaryColumns = [
-  { title: '模型', key: 'model', width: 160 },
+  {
+    title: '模型',
+    key: 'model',
+    width: 200,
+    render: (row: UsageStat) => {
+      const tm = row.target_model || ''
+      if (tm && tm !== row.model) return `${row.model} → ${tm}`
+      return row.model
+    },
+  },
   { title: '供应商', key: 'provider_name', width: 140 },
   { title: '请求次数', key: 'request_count', width: 100 },
   {
@@ -192,7 +202,7 @@ function buildLineChartOptions(data: UsageTrendPoint[]) {
 function buildPieChartOptions(data: UsageStat[]) {
   const theme = getEchartsTheme(isDark.value)
   const costData = data.map((item) => ({
-    name: item.model,
+    name: item.target_model || item.model,
     value: Number(item.cost_estimate.toFixed(4)),
   }))
 

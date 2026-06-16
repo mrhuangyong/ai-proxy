@@ -158,7 +158,23 @@ const columns = [
     width: 180,
     render: (row: RequestLog) => formatUtcTime(row.created_at),
   },
-  { title: '模型', key: 'model', width: 140 },
+  {
+    title: '模型',
+    key: 'model',
+    width: 200,
+    render: (row: RequestLog) => {
+      // Show "请求模型 -> 目标模型" when they differ, otherwise just the model name.
+      const tm = row.target_model || ''
+      if (tm && tm !== row.model) {
+        return h('span', { style: 'white-space: pre-wrap; word-break: break-all' }, [
+          row.model,
+          ' → ',
+          tm,
+        ])
+      }
+      return row.model
+    },
+  },
   { title: '供应商', key: 'provider_name', width: 100 },
   {
     title: '请求格式',

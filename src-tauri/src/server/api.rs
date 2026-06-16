@@ -215,6 +215,7 @@ struct LogEntry {
     provider_name: String,
     provider_format: String,
     model: String,
+    target_model: String,
     stream: bool,
     status_code: Option<i64>,
     duration_ms: Option<i64>,
@@ -264,8 +265,10 @@ async fn list_logs(
 
     if let Some(ref model) = query.model {
         if !model.trim().is_empty() {
-            conditions.push("model LIKE ?".to_string());
-            params.push(format!("%{}%", model.trim()));
+            conditions.push("(model LIKE ? OR target_model LIKE ?)".to_string());
+            let like = format!("%{}%", model.trim());
+            params.push(like.clone());
+            params.push(like);
         }
     }
 
@@ -284,7 +287,7 @@ async fn list_logs(
         }
     }
 
-    let select_cols = "id, request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json";
+    let select_cols = "id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json";
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -324,18 +327,19 @@ async fn list_logs(
             provider_name: row.get(3),
             provider_format: row.get(4),
             model: row.get(5),
-            stream: row.get::<i32, _>(6) != 0,
-            status_code: row.get(7),
-            duration_ms: row.get(8),
-            prompt_tokens: row.get::<Option<i64>, _>(9).unwrap_or(0),
-            completion_tokens: row.get::<Option<i64>, _>(10).unwrap_or(0),
-            total_tokens: row.get::<Option<i64>, _>(11).unwrap_or(0),
-            error_message: row.get(12),
-            cached_tokens: row.get::<Option<i64>, _>(13).unwrap_or(0),
-            ttft_ms: row.get(14),
-            created_at: row.get(15),
-            final_usage_json: row.get(16),
-            upstream_usage_events_json: row.get(17),
+            target_model: row.get(6),
+            stream: row.get::<i32, _>(7) != 0,
+            status_code: row.get(8),
+            duration_ms: row.get(9),
+            prompt_tokens: row.get::<Option<i64>, _>(10).unwrap_or(0),
+            completion_tokens: row.get::<Option<i64>, _>(11).unwrap_or(0),
+            total_tokens: row.get::<Option<i64>, _>(12).unwrap_or(0),
+            error_message: row.get(13),
+            cached_tokens: row.get::<Option<i64>, _>(14).unwrap_or(0),
+            ttft_ms: row.get(15),
+            created_at: row.get(16),
+            final_usage_json: row.get(17),
+            upstream_usage_events_json: row.get(18),
         })
         .collect();
 
@@ -348,7 +352,7 @@ async fn list_logs(
 async fn get_log(Path(id): Path<i64>) -> Result<Json<ApiResponse<LogEntry>>, Json<ApiError>> {
     let pool = get_pool().await;
     let row = sqlx::query(
-        "SELECT id, request_id, client_format, provider_name, provider_format, model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json FROM request_logs WHERE id = ?",
+        "SELECT id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json FROM request_logs WHERE id = ?",
     )
     .bind(id)
     .fetch_one(pool).await.map_err(|e| err_json(e.to_string()))?;
@@ -360,18 +364,19 @@ async fn get_log(Path(id): Path<i64>) -> Result<Json<ApiResponse<LogEntry>>, Jso
         provider_name: row.get(3),
         provider_format: row.get(4),
         model: row.get(5),
-        stream: row.get::<i32, _>(6) != 0,
-        status_code: row.get(7),
-        duration_ms: row.get(8),
-        prompt_tokens: row.get::<Option<i64>, _>(9).unwrap_or(0),
-        completion_tokens: row.get::<Option<i64>, _>(10).unwrap_or(0),
-        total_tokens: row.get::<Option<i64>, _>(11).unwrap_or(0),
-        error_message: row.get(12),
-        cached_tokens: row.get::<Option<i64>, _>(13).unwrap_or(0),
-        ttft_ms: row.get(14),
-        created_at: row.get(15),
-        final_usage_json: row.get(16),
-        upstream_usage_events_json: row.get(17),
+        target_model: row.get(6),
+        stream: row.get::<i32, _>(7) != 0,
+        status_code: row.get(8),
+        duration_ms: row.get(9),
+        prompt_tokens: row.get::<Option<i64>, _>(10).unwrap_or(0),
+        completion_tokens: row.get::<Option<i64>, _>(11).unwrap_or(0),
+        total_tokens: row.get::<Option<i64>, _>(12).unwrap_or(0),
+        error_message: row.get(13),
+        cached_tokens: row.get::<Option<i64>, _>(14).unwrap_or(0),
+        ttft_ms: row.get(15),
+        created_at: row.get(16),
+        final_usage_json: row.get(17),
+        upstream_usage_events_json: row.get(18),
     }))
 }
 
@@ -389,6 +394,7 @@ async fn clear_logs() -> Result<Json<ApiResponse<serde_json::Value>>, Json<ApiEr
 #[derive(Debug, Clone, Serialize)]
 struct UsageStat {
     model: String,
+    target_model: String,
     provider_name: String,
     prompt_tokens: i64,
     completion_tokens: i64,
@@ -420,21 +426,21 @@ async fn get_usage(
 ) -> Result<Json<ApiResponse<UsageSummary>>, Json<ApiError>> {
     let pool = get_pool().await;
     let (sql, param): (&str, String) = if query.days == 1 {
-        ("SELECT model, provider_name, \
+        ("SELECT model, target_model, provider_name, \
          SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), COUNT(*), SUM(cached_tokens) \
          FROM request_logs \
          WHERE date(created_at, 'localtime') = date('now', 'localtime') AND status_code = 200 \
-         GROUP BY model, provider_name \
+         GROUP BY model, target_model, provider_name \
          ORDER BY SUM(total_tokens) DESC", String::new())
     } else {
-        ("SELECT model, provider_name, \
+        ("SELECT model, target_model, provider_name, \
          SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), COUNT(*), SUM(cached_tokens) \
          FROM request_logs \
          WHERE created_at >= datetime('now', 'localtime', ? || ' days') AND status_code = 200 \
-         GROUP BY model, provider_name \
+         GROUP BY model, target_model, provider_name \
          ORDER BY SUM(total_tokens) DESC", format!("-{}", query.days))
     };
-    let rows: Vec<(String, String, i64, i64, i64, i64, i64)> = if query.days == 1 {
+    let rows: Vec<(String, String, String, i64, i64, i64, i64, i64)> = if query.days == 1 {
         sqlx::query_as(sql)
             .fetch_all(pool)
             .await
@@ -455,6 +461,7 @@ async fn get_usage(
         .map(
             |(
                 model,
+                target_model,
                 provider_name,
                 prompt_tokens,
                 completion_tokens,
@@ -462,12 +469,19 @@ async fn get_usage(
                 request_count,
                 cached_tokens,
             )| {
+                // Price by the actual model consumed upstream (target_model), falling back to model.
+                let cost_model = if target_model.is_empty() {
+                    &model
+                } else {
+                    &target_model
+                };
                 let cost_estimate =
-                    pricing.get_cost(&model, prompt_tokens as u32, completion_tokens as u32);
+                    pricing.get_cost(cost_model, prompt_tokens as u32, completion_tokens as u32);
                 total_cost += cost_estimate;
                 total_requests += request_count;
                 UsageStat {
                     model,
+                    target_model,
                     provider_name,
                     prompt_tokens,
                     completion_tokens,
@@ -501,15 +515,15 @@ async fn get_usage_trend(
 ) -> Result<Json<ApiResponse<Vec<UsageTrendPoint>>>, Json<ApiError>> {
     let pool = get_pool().await;
     let (sql, param): (&str, String) = if query.days == 1 {
-        ("SELECT strftime('%H:00', created_at, 'localtime'), model, SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) \
+        ("SELECT strftime('%H:00', created_at, 'localtime'), target_model, SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) \
          FROM request_logs \
          WHERE date(created_at, 'localtime') = date('now', 'localtime') AND status_code = 200 \
-         GROUP BY strftime('%H:00', created_at, 'localtime'), model \
-         ORDER BY strftime('%H:00', created_at, 'localtime') ASC, model ASC", String::new())
+         GROUP BY strftime('%H:00', created_at, 'localtime'), target_model \
+         ORDER BY strftime('%H:00', created_at, 'localtime') ASC, target_model ASC", String::new())
     } else {
-        ("SELECT DATE(created_at, 'localtime'), model, SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) \
+        ("SELECT DATE(created_at, 'localtime'), target_model, SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) \
          FROM request_logs WHERE created_at >= datetime('now', 'localtime', ? || ' days') AND status_code = 200 \
-         GROUP BY DATE(created_at, 'localtime'), model ORDER BY DATE(created_at, 'localtime') ASC, model ASC", format!("-{}", query.days))
+         GROUP BY DATE(created_at, 'localtime'), target_model ORDER BY DATE(created_at, 'localtime') ASC, target_model ASC", format!("-{}", query.days))
     };
     let rows: Vec<(String, String, i64, i64, i64)> = if query.days == 1 {
         sqlx::query_as(sql)
@@ -1007,6 +1021,7 @@ async fn test_model(
                 &route.provider_name,
                 &format!("{:?}", route.target_format).to_lowercase(),
                 &body.model_name,
+                &route.target_model,
                 false,
                 0,
                 duration,
@@ -1055,6 +1070,7 @@ async fn test_model(
             &route.provider_name,
             &format!("{:?}", route.target_format).to_lowercase(),
             &body.model_name,
+            &route.target_model,
             false,
             status.as_u16(),
             duration,
@@ -1110,6 +1126,7 @@ async fn test_model(
         &route.provider_name,
         &format!("{:?}", route.target_format).to_lowercase(),
         &body.model_name,
+        &route.target_model,
         false,
         status.as_u16(),
         duration,
