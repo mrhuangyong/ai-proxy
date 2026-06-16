@@ -7,7 +7,7 @@ use tracing_subscriber::prelude::*;
 #[command(name = "ai-proxy-server")]
 #[command(about = "AI Proxy Server Mode")]
 struct Args {
-    #[arg(short, long, default_value = "0.0.0.0")]
+    #[arg(long, default_value = "0.0.0.0")]
     host: String,
 
     #[arg(short, long, default_value_t = 7860)]

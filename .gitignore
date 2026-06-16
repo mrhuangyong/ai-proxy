@@ -25,6 +25,9 @@ dist-ssr
 
 .dbg
 
+# Local data dir (service-mode SQLite DB)
+.data
+
 # Local docs
 docs/superpowers
 
