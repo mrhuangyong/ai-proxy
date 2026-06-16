@@ -146,7 +146,7 @@ async function handleSubmit() {
   height: 520px;
   top: -180px;
   right: -120px;
-  background: radial-gradient(circle, rgba(180, 83, 9, 0.14), transparent 70%);
+  background: radial-gradient(circle, rgba(8, 145, 178, 0.14), transparent 70%);
 }
 
 .shape-2 {
@@ -178,7 +178,7 @@ async function handleSubmit() {
   left: 0;
   right: 0;
   height: 3px;
-  background: #B45309;
+  background: var(--accent);
 }
 
 .card-header {
@@ -195,7 +195,7 @@ async function handleSubmit() {
 }
 
 .brand-icon {
-  color: #B45309;
+  color: var(--accent);
 }
 
 .brand-name {
@@ -265,8 +265,8 @@ async function handleSubmit() {
 .field-input :deep(.n-input:hover .n-input__state-border),
 .field-input :deep(.n-input:focus-within .n-input__state-border),
 .field-input :deep(.n-input--focus .n-input__state-border) {
-  border-color: #B45309 !important;
-  box-shadow: 0 0 0 3px rgba(180, 83, 9, 0.08) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.08) !important;
 }
 
 .field-input :deep(.n-input__input-el),
@@ -274,7 +274,7 @@ async function handleSubmit() {
   color: #1A1A1A !important;
   font-family: var(--font-mono) !important;
   font-size: 14px !important;
-  caret-color: #B45309;
+  caret-color: var(--accent);
 }
 
 .field-input :deep(.n-input__placeholder) {
@@ -287,14 +287,14 @@ async function handleSubmit() {
 }
 
 .field-input :deep(.n-input__suffix .n-base-icon:hover) {
-  color: #B45309 !important;
+  color: var(--accent) !important;
 }
 
 /* ===== SUBMIT BUTTON ===== */
 .submit-btn {
   margin-top: 8px;
   height: 48px;
-  background: #B45309;
+  background: var(--accent);
   border: none;
   color: #FFFFFF;
   font-family: var(--font-sans);
@@ -307,9 +307,9 @@ async function handleSubmit() {
 }
 
 .submit-btn:not(:disabled):hover {
-  background: #92400E;
+  background: var(--accent-hover);
   transform: translateY(-1px);
-  box-shadow: 0 8px 20px rgba(180, 83, 9, 0.25);
+  box-shadow: 0 8px 20px rgba(8, 145, 178, 0.25);
 }
 
 .submit-btn:not(:disabled):active {
