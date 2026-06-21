@@ -97,6 +97,18 @@
             :input-props="{ autocapitalize: 'off' }"
           />
         </n-form-item>
+        <n-form-item label="上游 User-Agent">
+          <n-input-group>
+            <n-input
+              v-model:value="form.upstream_user_agent"
+              placeholder="留空则用全局 UA"
+              :input-props="{ autocapitalize: 'off' }"
+            />
+            <n-button @click="form.upstream_user_agent = CLAUDE_CLI_UA">
+              Claude CLI
+            </n-button>
+          </n-input-group>
+        </n-form-item>
         <n-form-item label="API Key" :required="!isEditing">
           <n-input
             v-model:value="form.api_key"
@@ -223,11 +235,14 @@ const testing = ref(false)
 const testingModel = ref('')
 const testResult = ref<TestResult | null>(null)
 
+const CLAUDE_CLI_UA = 'claude-cli/2.1.181 (external, cli)'
+
 const form = ref({
   name: '',
   base_url: '',
   format: 'completions' as string,
   endpoint_path: '',
+  upstream_user_agent: '',
   api_key: '',
   models: [] as Array<{ model_name: string; context_window: number | null }>,
 })
@@ -264,6 +279,7 @@ function openCreateModal() {
     base_url: '',
     format: 'completions',
     endpoint_path: '',
+    upstream_user_agent: '',
     api_key: '',
     models: [],
   }
@@ -278,6 +294,7 @@ function openEditModal(row: Provider) {
     base_url: row.base_url,
     format: row.format,
     endpoint_path: row.endpoint_path || '',
+    upstream_user_agent: row.upstream_user_agent || '',
     api_key: '',
     models: row.models.map((m) => ({
       model_name: m.model_name,
@@ -337,6 +354,7 @@ async function handleSubmit() {
         base_url: form.value.base_url,
         format: form.value.format,
         endpoint_path: form.value.endpoint_path || null,
+        upstream_user_agent: form.value.upstream_user_agent || '',
         models: form.value.models.map((m) => ({
           model_name: m.model_name,
           target_model: null,
@@ -359,6 +377,7 @@ async function handleSubmit() {
           base_url: form.value.base_url,
           format: form.value.format,
           endpoint_path: form.value.endpoint_path || null,
+          upstream_user_agent: form.value.upstream_user_agent || '',
           api_key: form.value.api_key,
           models: form.value.models.map((m) => ({
             model_name: m.model_name,

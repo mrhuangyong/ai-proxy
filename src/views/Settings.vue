@@ -93,6 +93,27 @@
             style="width: 100%"
           />
         </n-form-item>
+        <n-form-item>
+          <template #label>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <span>上游 User-Agent</span>
+              </template>
+              部分模型计划（coding/token/agent plan）会按 UA 限制客户端。
+              配置后转发上游时将使用此 UA；留空则透传客户端 UA。
+            </n-tooltip>
+          </template>
+          <n-input-group>
+            <n-input
+              v-model:value="settings.upstreamUserAgent"
+              placeholder="留空则透传客户端 UA"
+              :input-props="{ autocapitalize: 'off' }"
+            />
+            <n-button @click="settings.upstreamUserAgent = CLAUDE_CLI_UA">
+              Claude CLI
+            </n-button>
+          </n-input-group>
+        </n-form-item>
         <n-form-item label="代理 API Key">
           <n-input
             v-model:value="settings.proxyAuthKey"
@@ -158,6 +179,7 @@ import UpdateNotification from '../components/UpdateNotification.vue'
 
 const { mode: currentThemeMode, setMode } = useTheme()
 const message = useMessage()
+const CLAUDE_CLI_UA = 'claude-cli/2.1.181 (external, cli)'
 const themeMode = ref<ThemeMode>(currentThemeMode.value)
 
 interface AppSettings {
@@ -173,6 +195,7 @@ interface AppSettings {
   upstreamInvisibleRetryTotalTimeoutSecs: number
   upstreamInvisibleRetryBufferLimitMb: number
   extractSystemFromMessages: boolean
+  upstreamUserAgent: string
 }
 
 const settings = ref<AppSettings>({
@@ -188,6 +211,7 @@ const settings = ref<AppSettings>({
   upstreamInvisibleRetryTotalTimeoutSecs: 600,
   upstreamInvisibleRetryBufferLimitMb: 32,
   extractSystemFromMessages: true,
+  upstreamUserAgent: '',
 })
 
 const savedNetworkConfig = ref({
@@ -219,6 +243,7 @@ async function loadSettings() {
       upstream_invisible_retry_total_timeout_secs: string
       upstream_invisible_retry_buffer_limit_mb: string
       extract_system_from_messages: string
+      upstream_user_agent: string
     }>('/api/settings')
     settings.value = {
       port: parseInt(data.http_port) || 7860,
@@ -233,6 +258,7 @@ async function loadSettings() {
       upstreamInvisibleRetryTotalTimeoutSecs: parseInt(data.upstream_invisible_retry_total_timeout_secs) || 600,
       upstreamInvisibleRetryBufferLimitMb: parseInt(data.upstream_invisible_retry_buffer_limit_mb) || 32,
       extractSystemFromMessages: data.extract_system_from_messages !== 'false',
+      upstreamUserAgent: data.upstream_user_agent || '',
     }
     savedNetworkConfig.value = {
       port: settings.value.port,
@@ -266,6 +292,7 @@ async function handleSave() {
         upstream_invisible_retry_total_timeout_secs: String(settings.value.upstreamInvisibleRetryTotalTimeoutSecs),
         upstream_invisible_retry_buffer_limit_mb: String(settings.value.upstreamInvisibleRetryBufferLimitMb),
         extract_system_from_messages: String(settings.value.extractSystemFromMessages),
+        upstream_user_agent: settings.value.upstreamUserAgent,
       }),
     })
 
