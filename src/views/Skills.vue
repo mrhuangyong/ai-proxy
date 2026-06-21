@@ -255,27 +255,60 @@
     <!-- Install to Target Sources Modal -->
     <n-modal
       v-model:show="showInstallTargetModal"
-      preset="dialog"
-      :title="`安装技能 - ${installTargetSkill?.name || ''}`"
-      positive-text="安装"
-      negative-text="取消"
-      :loading="installTargetLoading"
-      @positive-click="handleInstallToTargets"
-      style="width: 480px"
+      preset="card"
+      :title="`安装技能 · ${installTargetSkill?.name || ''}`"
+      style="width: 520px"
+      :bordered="false"
+      :mask-closable="false"
     >
-      <n-space vertical>
-        <n-text>选择要安装到的目标源：</n-text>
-        <n-checkbox-group v-model:value="installTargetSourceIds">
-          <n-space vertical>
-            <n-checkbox
-              v-for="source in installableSources"
-              :key="source.id"
-              :value="source.id"
-              :label="source.name"
-            />
+      <div class="install-modal-desc">
+        选择要安装到的目标源（将以符号链接形式创建），已选
+        <span class="install-modal-count">{{ installTargetSourceIds.length }}</span>
+        / {{ installableSources.length }}
+      </div>
+      <div v-if="installableSources.length > 0" class="install-source-list">
+        <div
+          v-for="source in installableSources"
+          :key="source.id"
+          class="install-source-item"
+          :class="{ 'install-source-item--active': installTargetSourceIds.includes(source.id) }"
+          @click="toggleInstallSource(source.id)"
+        >
+          <div class="install-source-check">
+            <n-icon :color="installTargetSourceIds.includes(source.id) ? 'var(--accent)' : 'var(--text-3)'">
+              <checkmark-circle v-if="installTargetSourceIds.includes(source.id)" />
+              <ellipse-outline v-else />
+            </n-icon>
+          </div>
+          <div class="install-source-info">
+            <div class="install-source-name">
+              {{ source.name }}
+              <n-tag v-if="toBool(source.is_default)" size="tiny" round type="info" style="margin-left: 4px">默认</n-tag>
+            </div>
+            <div class="install-source-path font-mono">{{ source.path }}</div>
+          </div>
+          <div class="install-source-count">{{ source.skill_count }} 个技能</div>
+        </div>
+      </div>
+      <n-empty v-else description="暂无可安装的非全局源" style="padding: 24px 0" />
+      <template #footer>
+        <n-space justify="space-between" align="center">
+          <n-button
+            text
+            size="small"
+            @click="installTargetSourceIds = installableSources.map((s) => s.id)"
+          >全选</n-button>
+          <n-space>
+            <n-button @click="showInstallTargetModal = false">取消</n-button>
+            <n-button
+              type="primary"
+              :loading="installTargetLoading"
+              :disabled="installTargetSourceIds.length === 0"
+              @click="handleInstallToTargets"
+            >安装</n-button>
           </n-space>
-        </n-checkbox-group>
-      </n-space>
+        </n-space>
+      </template>
     </n-modal>
 
     <!-- Edit SKILL.md Modal -->
@@ -425,7 +458,7 @@ import { markdown } from '@codemirror/lang-markdown'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { EditorView } from '@codemirror/view'
 import { EditorState, type Extension } from '@codemirror/state'
-import { ExpandOutline, ContractOutline } from '@vicons/ionicons5'
+import { ExpandOutline, ContractOutline, CheckmarkCircle, EllipseOutline } from '@vicons/ionicons5'
 import type {
   SkillSourceWithCount,
   Skill,
@@ -864,6 +897,16 @@ function openInstallTargetModal(skill: Skill) {
   showInstallTargetModal.value = true
 }
 
+// Toggle a single target source on/off in the install modal.
+function toggleInstallSource(sourceId: string) {
+  const idx = installTargetSourceIds.value.indexOf(sourceId)
+  if (idx === -1) {
+    installTargetSourceIds.value = [...installTargetSourceIds.value, sourceId]
+  } else {
+    installTargetSourceIds.value = installTargetSourceIds.value.filter((id) => id !== sourceId)
+  }
+}
+
 async function handleInstallToTargets() {
   if (!installTargetSkill.value) return false
   if (installTargetSourceIds.value.length === 0) {
@@ -1295,6 +1338,72 @@ onMounted(async () => {
   padding-top: 8px;
   border-top: 1px solid var(--border);
   margin-top: auto;
+}
+
+/* Install-to modal */
+.install-modal-desc {
+  font-size: 13px;
+  color: var(--text-2);
+  margin-bottom: 12px;
+}
+.install-modal-count {
+  color: var(--accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.install-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.install-source-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  background: var(--bg-elevated);
+}
+.install-source-item:hover {
+  border-color: var(--text-3);
+}
+.install-source-item--active {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.install-source-check {
+  display: flex;
+  align-items: center;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.install-source-info {
+  flex: 1;
+  min-width: 0;
+}
+.install-source-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-1);
+  display: flex;
+  align-items: center;
+}
+.install-source-path {
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+.install-source-count {
+  font-size: 12px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 </style>
 
