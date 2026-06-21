@@ -277,7 +277,7 @@ const columns = [
             'display: inline-block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; cursor: pointer',
           onClick: () => copyText(ua),
         },
-        () => ua,
+        ua,
       )
       return h(
         NTooltip,
