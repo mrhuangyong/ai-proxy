@@ -287,6 +287,33 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 021: add client_user_agent to request_logs");
     }
 
+    // Migration 022: global custom upstream User-Agent
+    let has_upstream_user_agent: bool =
+        sqlx::query_scalar("SELECT COUNT(*) > 0 FROM settings WHERE key = 'upstream_user_agent'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
+
+    if !has_upstream_user_agent {
+        let migration22 = include_str!("../../migrations/022_add_upstream_user_agent.sql");
+        sqlx::query(migration22).execute(pool).await?;
+        info!("Applied migration 022: add upstream_user_agent setting");
+    }
+
+    // Migration 023: per-provider upstream User-Agent override
+    let has_provider_upstream_user_agent: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('providers') WHERE name = 'upstream_user_agent'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_provider_upstream_user_agent {
+        let migration23 = include_str!("../../migrations/023_add_provider_upstream_user_agent.sql");
+        sqlx::query(migration23).execute(pool).await?;
+        info!("Applied migration 023: add upstream_user_agent to providers");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

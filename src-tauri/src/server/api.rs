@@ -74,6 +74,7 @@ struct CreateProviderBody {
     base_url: String,
     format: String,
     endpoint_path: Option<String>,
+    upstream_user_agent: Option<String>,
     api_key: String,
     models: Vec<ModelInput>,
 }
@@ -92,13 +93,14 @@ async fn create_provider(
     let id = uuid::Uuid::new_v4().to_string();
 
     sqlx::query(
-        "INSERT INTO providers (id, name, base_url, format, endpoint_path) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO providers (id, name, base_url, format, endpoint_path, upstream_user_agent) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&body.name)
     .bind(&body.base_url)
     .bind(&body.format)
     .bind(&body.endpoint_path)
+    .bind(body.upstream_user_agent.as_deref().unwrap_or(""))
     .execute(pool)
     .await
     .map_err(|e| err_json(e.to_string()))?;
@@ -125,6 +127,7 @@ struct UpdateProviderBody {
     base_url: Option<String>,
     format: Option<String>,
     endpoint_path: Option<Option<String>>,
+    upstream_user_agent: Option<String>,
     api_key: Option<String>,
     models: Option<Vec<ModelInput>>,
 }
@@ -135,8 +138,8 @@ async fn update_provider(
 ) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
     let pool = get_pool().await;
 
-    let current: (String, String, String, Option<String>) =
-        sqlx::query_as("SELECT name, base_url, format, endpoint_path FROM providers WHERE id = ?")
+    let current: (String, String, String, Option<String>, String) =
+        sqlx::query_as("SELECT name, base_url, format, endpoint_path, upstream_user_agent FROM providers WHERE id = ?")
             .bind(&id)
             .fetch_one(pool)
             .await
@@ -146,9 +149,10 @@ async fn update_provider(
     let base_url = body.base_url.unwrap_or(current.1);
     let format = body.format.unwrap_or(current.2);
     let endpoint_path = body.endpoint_path.unwrap_or(current.3);
+    let upstream_user_agent = body.upstream_user_agent.unwrap_or(current.4);
 
-    sqlx::query("UPDATE providers SET name = ?, base_url = ?, format = ?, endpoint_path = ?, updated_at = datetime('now') WHERE id = ?")
-        .bind(&name).bind(&base_url).bind(&format).bind(&endpoint_path).bind(&id)
+    sqlx::query("UPDATE providers SET name = ?, base_url = ?, format = ?, endpoint_path = ?, upstream_user_agent = ?, updated_at = datetime('now') WHERE id = ?")
+        .bind(&name).bind(&base_url).bind(&format).bind(&endpoint_path).bind(&upstream_user_agent).bind(&id)
         .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
 
     if let Some(models) = body.models {
@@ -718,12 +722,13 @@ struct Settings {
     upstream_invisible_retry_mode: String,
     upstream_invisible_retry_total_timeout_secs: String,
     upstream_invisible_retry_buffer_limit_mb: String,
+    upstream_user_agent: String,
 }
 
 async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
     let pool = get_pool().await;
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT key, value FROM settings WHERE key IN ('http_port', 'log_retention_days', 'record_request_body', 'proxy_auth_enabled', 'proxy_auth_key', 'request_timeout', 'connect_timeout', 'codex_preserve_auth', 'upstream_max_retries', 'upstream_retry_backoff_base_ms', 'extract_system_from_messages', 'upstream_invisible_retry_mode', 'upstream_invisible_retry_total_timeout_secs', 'upstream_invisible_retry_buffer_limit_mb')"
+        "SELECT key, value FROM settings WHERE key IN ('http_port', 'log_retention_days', 'record_request_body', 'proxy_auth_enabled', 'proxy_auth_key', 'request_timeout', 'connect_timeout', 'codex_preserve_auth', 'upstream_max_retries', 'upstream_retry_backoff_base_ms', 'extract_system_from_messages', 'upstream_invisible_retry_mode', 'upstream_invisible_retry_total_timeout_secs', 'upstream_invisible_retry_buffer_limit_mb', 'upstream_user_agent')"
     ).fetch_all(pool).await.map_err(|e| err_json(e.to_string()))?;
 
     let map: HashMap<String, String> = rows.into_iter().collect();
@@ -781,6 +786,7 @@ async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
             .get("upstream_invisible_retry_buffer_limit_mb")
             .cloned()
             .unwrap_or_else(|| "32".into()),
+        upstream_user_agent: map.get("upstream_user_agent").cloned().unwrap_or_default(),
     }))
 }
 
@@ -800,6 +806,7 @@ struct UpdateSettingsBody {
     upstream_invisible_retry_mode: Option<String>,
     upstream_invisible_retry_total_timeout_secs: Option<String>,
     upstream_invisible_retry_buffer_limit_mb: Option<String>,
+    upstream_user_agent: Option<String>,
 }
 
 async fn update_settings(
@@ -836,6 +843,7 @@ async fn update_settings(
             "upstream_invisible_retry_buffer_limit_mb",
             body.upstream_invisible_retry_buffer_limit_mb,
         ),
+        ("upstream_user_agent", body.upstream_user_agent),
     ];
     for (key, value) in updates {
         if let Some(v) = value {
@@ -1000,6 +1008,33 @@ async fn test_model(
         .post(&url)
         .json(&target_body)
         .header("Content-Type", "application/json");
+
+    // Inject custom upstream User-Agent so the test request honors the same UA config
+    // (provider override > global > none).
+    {
+        let pool = crate::db::get_pool().await;
+        let global_ua: Option<String> = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM settings WHERE key = 'upstream_user_agent'",
+        )
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        let final_ua: &str = if !route.upstream_user_agent.is_empty() {
+            &route.upstream_user_agent
+        } else if let Some(ref g) = global_ua {
+            if !g.is_empty() {
+                g.as_str()
+            } else {
+                ""
+            }
+        } else {
+            ""
+        };
+        if !final_ua.is_empty() {
+            req_builder = req_builder.header("User-Agent", final_ua);
+        }
+    }
 
     match route.target_format {
         ClientFormat::Anthropic => {

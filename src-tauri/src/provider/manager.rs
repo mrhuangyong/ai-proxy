@@ -13,6 +13,7 @@ pub struct ResolvedRoute {
     pub target_format: ClientFormat,
     pub target_model: String,
     pub endpoint_path: String,
+    pub upstream_user_agent: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -23,6 +24,7 @@ struct DbProvider {
     format: String,
     endpoint_path: Option<String>,
     enabled: i64,
+    upstream_user_agent: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -52,7 +54,7 @@ impl ProviderManager {
     pub async fn list() -> Result<Vec<Provider>, crate::error::ProxyError> {
         let pool = get_pool().await;
         let db_providers: Vec<DbProvider> =
-            sqlx::query_as("SELECT id, name, base_url, format, endpoint_path, enabled FROM providers ORDER BY name")
+            sqlx::query_as("SELECT id, name, base_url, format, endpoint_path, enabled, upstream_user_agent FROM providers ORDER BY name")
                 .fetch_all(pool)
                 .await
                 .map_err(|e| crate::error::ProxyError::Database(e))?;
@@ -68,6 +70,7 @@ impl ProviderManager {
                 format: p.format,
                 endpoint_path: p.endpoint_path,
                 enabled: p.enabled != 0,
+                upstream_user_agent: p.upstream_user_agent,
                 models,
                 api_keys,
             });
@@ -79,7 +82,7 @@ impl ProviderManager {
     pub async fn get_by_id(provider_id: &str) -> Result<Provider, crate::error::ProxyError> {
         let pool = get_pool().await;
         let p: DbProvider = sqlx::query_as(
-            "SELECT id, name, base_url, format, endpoint_path, enabled FROM providers WHERE id = ?",
+            "SELECT id, name, base_url, format, endpoint_path, enabled, upstream_user_agent FROM providers WHERE id = ?",
         )
         .bind(provider_id)
         .fetch_one(pool)
@@ -96,6 +99,7 @@ impl ProviderManager {
             format: p.format,
             endpoint_path: p.endpoint_path,
             enabled: p.enabled != 0,
+            upstream_user_agent: p.upstream_user_agent,
             models,
             api_keys,
         })
@@ -121,7 +125,7 @@ impl ProviderManager {
 
         let pool = get_pool().await;
         let provider: DbProvider = sqlx::query_as(
-            "SELECT id, name, base_url, format, endpoint_path, enabled FROM providers WHERE id = ?",
+            "SELECT id, name, base_url, format, endpoint_path, enabled, upstream_user_agent FROM providers WHERE id = ?",
         )
         .bind(&matched.provider_id)
         .fetch_one(pool)
@@ -156,6 +160,7 @@ impl ProviderManager {
             target_format,
             target_model,
             endpoint_path,
+            upstream_user_agent: provider.upstream_user_agent,
         })
     }
 

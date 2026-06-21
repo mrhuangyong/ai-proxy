@@ -601,6 +601,21 @@ async fn handle_proxy(
         }
     };
 
+    // Inject custom upstream User-Agent (provider override > global > passthrough client UA).
+    {
+        let global_ua = get_setting("upstream_user_agent").await.unwrap_or_default();
+        let final_ua: &str = if !route.upstream_user_agent.is_empty() {
+            &route.upstream_user_agent
+        } else if !global_ua.is_empty() {
+            &global_ua
+        } else {
+            ""
+        };
+        if !final_ua.is_empty() {
+            extra_headers.insert("user-agent".to_string(), final_ua.to_string());
+        }
+    }
+
     let target_model = route.target_model.clone();
     ir_request.model = target_model.clone();
 
@@ -2533,6 +2548,17 @@ fn extract_text_from_html(html: &str, max_len: usize) -> String {
         .trim()
         .to_string();
     text.chars().take(max_len).collect()
+}
+
+/// Read a single setting value from the settings table (returns None if missing).
+async fn get_setting(key: &str) -> Option<String> {
+    let pool = crate::db::get_pool().await;
+    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
 }
 
 fn extract_headers(header_map: &axum::http::HeaderMap, headers: &mut HashMap<String, String>) {
