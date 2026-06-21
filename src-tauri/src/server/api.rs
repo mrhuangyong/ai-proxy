@@ -228,6 +228,7 @@ struct LogEntry {
     created_at: String,
     final_usage_json: Option<String>,
     upstream_usage_events_json: Option<String>,
+    client_user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,7 +288,7 @@ async fn list_logs(
         }
     }
 
-    let select_cols = "id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json";
+    let select_cols = "id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json, client_user_agent";
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -340,6 +341,7 @@ async fn list_logs(
             created_at: row.get(16),
             final_usage_json: row.get(17),
             upstream_usage_events_json: row.get(18),
+            client_user_agent: row.get(19),
         })
         .collect();
 
@@ -352,7 +354,7 @@ async fn list_logs(
 async fn get_log(Path(id): Path<i64>) -> Result<Json<ApiResponse<LogEntry>>, Json<ApiError>> {
     let pool = get_pool().await;
     let row = sqlx::query(
-        "SELECT id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json FROM request_logs WHERE id = ?",
+        "SELECT id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json, client_user_agent FROM request_logs WHERE id = ?",
     )
     .bind(id)
     .fetch_one(pool).await.map_err(|e| err_json(e.to_string()))?;
@@ -377,6 +379,7 @@ async fn get_log(Path(id): Path<i64>) -> Result<Json<ApiResponse<LogEntry>>, Jso
         created_at: row.get(16),
         final_usage_json: row.get(17),
         upstream_usage_events_json: row.get(18),
+        client_user_agent: row.get(19),
     }))
 }
 
@@ -415,6 +418,9 @@ struct UsageSummary {
 struct UsageQuery {
     #[serde(default = "default_days")]
     days: i64,
+    /// Day offset for the `days == 1` branch: 0 = today, 1 = yesterday, etc.
+    #[serde(default)]
+    offset: i64,
 }
 
 fn default_days() -> i64 {
@@ -426,12 +432,13 @@ async fn get_usage(
 ) -> Result<Json<ApiResponse<UsageSummary>>, Json<ApiError>> {
     let pool = get_pool().await;
     let (sql, param): (&str, String) = if query.days == 1 {
+        // Single-day branch supports an offset (0 = today, 1 = yesterday, ...).
         ("SELECT model, target_model, provider_name, \
          SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), COUNT(*), SUM(cached_tokens) \
          FROM request_logs \
-         WHERE date(created_at, 'localtime') = date('now', 'localtime') AND status_code = 200 \
+         WHERE date(created_at, 'localtime') = date('now', 'localtime', ?) AND status_code = 200 \
          GROUP BY model, target_model, provider_name \
-         ORDER BY SUM(total_tokens) DESC", String::new())
+         ORDER BY SUM(total_tokens) DESC", format!("-{} day", query.offset))
     } else {
         ("SELECT model, target_model, provider_name, \
          SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), COUNT(*), SUM(cached_tokens) \
@@ -440,18 +447,11 @@ async fn get_usage(
          GROUP BY model, target_model, provider_name \
          ORDER BY SUM(total_tokens) DESC", format!("-{}", query.days))
     };
-    let rows: Vec<(String, String, String, i64, i64, i64, i64, i64)> = if query.days == 1 {
-        sqlx::query_as(sql)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| err_json(e.to_string()))?
-    } else {
-        sqlx::query_as(sql)
-            .bind(&param)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| err_json(e.to_string()))?
-    };
+    let rows: Vec<(String, String, String, i64, i64, i64, i64, i64)> = sqlx::query_as(sql)
+        .bind(&param)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
 
     let pricing = PricingTable::default();
     let mut total_cost = 0.0;
@@ -1034,6 +1034,7 @@ async fn test_model(
                 None,
                 0,
                 None,
+                None,
             )
             .await;
             return Ok(ok(TestModelResult {
@@ -1082,6 +1083,7 @@ async fn test_model(
             None,
             None,
             0,
+            None,
             None,
         )
         .await;
@@ -1138,6 +1140,7 @@ async fn test_model(
         None,
         None,
         0,
+        None,
         None,
     )
     .await;

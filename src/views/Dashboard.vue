@@ -19,7 +19,10 @@
       <div class="stat-tile">
         <div class="stat-tile-top" style="background: var(--warning);" />
         <div class="stat-tile-value tabular-nums">{{ formatNumber(todayTokens) }}</div>
-        <div class="stat-tile-label" title="今日累计 Token 消耗量">今日 Token 用量</div>
+        <div class="stat-tile-label" title="今日 / 昨日累计 Token 消耗量">
+          Token 用量
+          <span style="margin-left: 6px; color: var(--text-3); font-weight: 400;">昨 {{ formatNumber(yesterdayTokens) }}</span>
+        </div>
       </div>
     </div>
 
@@ -69,6 +72,7 @@ const providerCount = ref(0)
 const routeCount = ref(0)
 const todayRequests = ref(0)
 const todayTokens = ref(0)
+const yesterdayTokens = ref(0)
 const timeRange = ref<'today' | 'week' | 'month'>('today')
 const chartRef = ref<HTMLElement | null>(null)
 let chart: echarts.ECharts | null = null
@@ -181,14 +185,16 @@ async function refreshStats() {
   if (isRefreshing) return
   isRefreshing = true
   try {
-    const [providers, usage] = await Promise.all([
+    const [providers, usage, usageYesterday] = await Promise.all([
       api<Provider[]>('/api/providers'),
       api<UsageResponse>('/api/usage?days=1'),
+      api<UsageResponse>('/api/usage?days=1&offset=1'),
     ])
     providerCount.value = providers.length
     routeCount.value = providers.reduce((sum, p) => sum + p.models.length, 0)
     todayRequests.value = usage.total_requests
     todayTokens.value = usage.stats.reduce((sum, s) => sum + s.total_tokens, 0)
+    yesterdayTokens.value = usageYesterday.stats.reduce((sum, s) => sum + s.total_tokens, 0)
   } catch {
     // silently fail
   } finally {

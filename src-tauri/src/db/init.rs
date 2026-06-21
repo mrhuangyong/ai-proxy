@@ -273,6 +273,20 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 020: split model into model + target_model");
     }
 
+    // Migration 021: record downstream (client) User-Agent on request_logs
+    let has_client_user_agent: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('request_logs') WHERE name = 'client_user_agent'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_client_user_agent {
+        let migration21 = include_str!("../../migrations/021_add_client_user_agent.sql");
+        sqlx::query(migration21).execute(pool).await?;
+        info!("Applied migration 021: add client_user_agent to request_logs");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

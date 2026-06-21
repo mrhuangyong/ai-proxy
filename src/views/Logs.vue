@@ -262,6 +262,32 @@ const columns = [
     render: (row: RequestLog) =>
       h(NTag, { size: 'small', type: row.stream ? 'success' : 'default' }, () => (row.stream ? '是' : '否')),
   },
+  {
+    title: '客户端 UA',
+    key: 'client_user_agent',
+    width: 180,
+    render: (row: RequestLog) => {
+      const ua = row.client_user_agent || ''
+      if (!ua) return '-'
+      const span = h(
+        'span',
+        {
+          style:
+            'display: inline-block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; cursor: pointer',
+          onClick: () => copyText(ua),
+        },
+        () => ua,
+      )
+      return h(
+        NTooltip,
+        { trigger: 'hover' },
+        {
+          trigger: () => span,
+          default: () => '点击复制：' + ua,
+        },
+      )
+    },
+  },
 ]
 
 function handlePageChange(page: number) {

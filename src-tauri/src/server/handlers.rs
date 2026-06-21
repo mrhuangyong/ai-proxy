@@ -225,6 +225,13 @@ async fn handle_proxy(
 
     let (parts, body) = request.into_parts();
 
+    // Capture the downstream (client) User-Agent for request logging.
+    let client_user_agent = parts
+        .headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
@@ -256,6 +263,7 @@ async fn handle_proxy(
                 None,
                 0,
                 None,
+                client_user_agent.as_deref(),
             )
             .await
             {
@@ -409,6 +417,7 @@ async fn handle_proxy(
                 None,
                 0,
                 None,
+                client_user_agent.as_deref(),
             )
             .await
             {
@@ -482,6 +491,7 @@ async fn handle_proxy(
                 None,
                 0,
                 None,
+                client_user_agent.as_deref(),
             )
             .await
             {
@@ -515,6 +525,7 @@ async fn handle_proxy(
                     None,
                     0,
                     None,
+                    client_user_agent.as_deref(),
                 )
                 .await
                 {
@@ -548,6 +559,7 @@ async fn handle_proxy(
             None,
             0,
             None,
+            client_user_agent.as_deref(),
         )
         .await
         {
@@ -579,6 +591,7 @@ async fn handle_proxy(
                 None,
                 0,
                 None,
+                client_user_agent.as_deref(),
             )
             .await
             {
@@ -637,6 +650,7 @@ async fn handle_proxy(
                 None,
                 0,
                 None,
+                client_user_agent.as_deref(),
             )
             .await
             {
@@ -825,6 +839,7 @@ async fn handle_proxy(
                         None,
                         retry_count as i64,
                         Some(&last_error),
+                        client_user_agent.as_deref(),
                     )
                     .await;
                     return response;
@@ -862,6 +877,7 @@ async fn handle_proxy(
                 None,
                 retry_count as i64,
                 Some(&last_error),
+                client_user_agent.as_deref(),
             )
             .await
             {
@@ -894,6 +910,7 @@ async fn handle_proxy(
                 None,
                 0,
                 None,
+                client_user_agent.as_deref(),
             )
             .await
             {
@@ -951,6 +968,7 @@ async fn handle_proxy(
             None,
             0,
             None,
+            client_user_agent.as_deref(),
         )
         .await
         {
@@ -1092,6 +1110,7 @@ async fn handle_proxy(
             upstream_usage_events_json.as_deref(),
             retry_count_for_log as i64,
             last_error_for_log.as_deref(),
+            client_user_agent.as_deref(),
         )
         .await
         {
@@ -1168,6 +1187,7 @@ async fn handle_proxy(
             interrupted: AtomicBool::new(false),
             upstream_retry_count: retry_count_for_log as i64,
             upstream_last_error: last_error_for_log.clone(),
+            client_user_agent: client_user_agent.clone(),
         });
         let stream_state_ref = stream_state.clone();
 
@@ -2254,6 +2274,7 @@ async fn handle_proxy(
                 upstream_usage_events_json.as_deref(),
                 retry_count_for_log as i64,
                 last_error_for_log.as_deref(),
+                stream_state_ref.client_user_agent.as_deref(),
             )
             .await
             {
@@ -2553,6 +2574,7 @@ async fn log_request_entry(
     upstream_usage_events_json: Option<&str>,
     upstream_retry_count: i64,
     upstream_last_error: Option<&str>,
+    client_user_agent: Option<&str>,
 ) -> Result<(), ProxyError> {
     log_request(
         request_id,
@@ -2573,6 +2595,7 @@ async fn log_request_entry(
         upstream_usage_events_json,
         upstream_retry_count,
         upstream_last_error,
+        client_user_agent,
     )
     .await
 }
@@ -2597,6 +2620,8 @@ struct StreamLogState {
     interrupted: AtomicBool,
     upstream_retry_count: i64,
     upstream_last_error: Option<String>,
+    /// Downstream (client) User-Agent, captured at request entry for logging.
+    client_user_agent: Option<String>,
 }
 
 struct StreamLoggingGuard {
@@ -2655,6 +2680,7 @@ impl Drop for StreamLoggingGuard {
                 upstream_usage_events_json.as_deref(),
                 state.upstream_retry_count,
                 state.upstream_last_error.as_deref(),
+                state.client_user_agent.as_deref(),
             )
             .await
             {

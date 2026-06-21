@@ -48,6 +48,7 @@ export interface RequestLog {
   created_at: string
   final_usage_json?: string | null
   upstream_usage_events_json?: string | null
+  client_user_agent?: string | null
 }
 
 export interface UsageSummary {
