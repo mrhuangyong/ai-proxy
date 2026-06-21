@@ -34,11 +34,35 @@
         </n-space>
       </template>
 
+      <!-- Summary stat tiles (reuses global .stat-tile styles) -->
+      <div class="skill-stats">
+        <div class="stat-tile">
+          <div class="stat-tile-top" style="background: var(--accent);" />
+          <div class="stat-tile-value tabular-nums">{{ skills.length }}</div>
+          <div class="stat-tile-label">技能总数</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-tile-top" style="background: var(--info);" />
+          <div class="stat-tile-value tabular-nums">{{ sources.length }}</div>
+          <div class="stat-tile-label">技能源</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-tile-top" style="background: var(--success);" />
+          <div class="stat-tile-value tabular-nums">{{ globalSkillCount }}</div>
+          <div class="stat-tile-label">全局库技能</div>
+        </div>
+        <div class="stat-tile" :class="{ 'skill-stat--alert': brokenCount > 0 }">
+          <div class="stat-tile-top" :style="{ background: brokenCount > 0 ? 'var(--error)' : 'var(--warning)' }" />
+          <div class="stat-tile-value tabular-nums">{{ brokenCount }}</div>
+          <div class="stat-tile-label">失效链接</div>
+        </div>
+      </div>
+
       <n-input
         v-model:value="searchQuery"
         placeholder="搜索技能名称或描述..."
         clearable
-        style="margin-bottom: 12px"
+        style="margin-bottom: 16px"
       />
 
       <n-spin :show="loading">
@@ -54,17 +78,95 @@
             :name="source.id"
             :tab="`${source.name} (${getSkillsForSource(source.id).length})`"
           >
-            <n-data-table
-              :columns="columns"
-              :data="getSkillsForSource(source.id)"
-              :row-key="(row: Skill) => row.id"
-              :row-class-name="(row: Skill) => toBool(row.is_broken_symlink) ? 'broken-symlink-row' : ''"
-              :bordered="false"
-              :scroll-x="900"
-            />
+            <div v-if="getSkillsForSource(source.id).length > 0" class="skill-grid">
+              <div
+                v-for="skill in getSkillsForSource(source.id)"
+                :key="skill.id"
+                class="skill-card"
+                :class="{ 'skill-card--broken': toBool(skill.is_broken_symlink) }"
+                :data-type="skillType(skill)"
+              >
+                <div class="skill-card-bar" />
+                <div class="skill-card-header">
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <span class="skill-card-name">{{ skill.name }}</span>
+                    </template>
+                    {{ skill.description || skill.name }}
+                  </n-tooltip>
+                  <n-tag size="small" round :type="skillTagType(skill)">
+                    {{ skillTypeLabel(skill) }}
+                  </n-tag>
+                </div>
+                <n-tooltip trigger="hover" :disabled="!(skill.description && skill.description.length > 90)">
+                  <template #trigger>
+                    <div class="skill-card-desc">{{ skill.description || '暂无描述' }}</div>
+                  </template>
+                  {{ skill.description }}
+                </n-tooltip>
+                <n-tooltip trigger="hover" :disabled="!skill.skill_path">
+                  <template #trigger>
+                    <div class="skill-card-path font-mono">{{ skill.skill_path || '-' }}</div>
+                  </template>
+                  {{ skill.link_target || skill.skill_path }}
+                </n-tooltip>
+
+                <div class="skill-card-actions">
+                  <!-- Install to... (only for global skills) -->
+                  <n-button
+                    v-if="isSkillGlobal(skill)"
+                    size="small"
+                    quaternary
+                    type="primary"
+                    @click="openInstallTargetModal(skill)"
+                  >安装到...</n-button>
+                  <!-- Copy to global (non-global, non-symlink, non-broken) -->
+                  <n-button
+                    v-if="!isSkillGlobal(skill) && !toBool(skill.is_symlink) && !toBool(skill.is_broken_symlink)"
+                    size="small"
+                    quaternary
+                    type="success"
+                    @click="handleCopyToGlobal(skill)"
+                  >复制到全局</n-button>
+                  <!-- Edit SKILL.md -->
+                  <n-button
+                    v-if="toBool(skill.has_skill_md)"
+                    size="small"
+                    quaternary
+                    type="info"
+                    @click="openEditMdModal(skill)"
+                  >编辑 MD</n-button>
+                  <!-- Cleanup broken symlink -->
+                  <n-popconfirm v-if="toBool(skill.is_broken_symlink)" @positive-click="handleCleanupSingle(skill.id)">
+                    <template #trigger>
+                      <n-button size="small" quaternary type="error">清理</n-button>
+                    </template>
+                    确认清理此失效链接？
+                  </n-popconfirm>
+                  <!-- Uninstall (symlink only) or Delete -->
+                  <n-popconfirm
+                    v-if="toBool(skill.is_symlink) && !toBool(skill.is_broken_symlink)"
+                    @positive-click="handleUninstall(skill.id)"
+                  >
+                    <template #trigger>
+                      <n-button size="small" quaternary type="warning">卸载</n-button>
+                    </template>
+                    确认卸载此技能？仅删除符号链接。
+                  </n-popconfirm>
+                  <n-button
+                    v-else-if="!toBool(skill.is_broken_symlink)"
+                    size="small"
+                    quaternary
+                    type="error"
+                    @click="handleDeleteWithCheck(skill)"
+                  >删除</n-button>
+                </div>
+              </div>
+            </div>
+            <n-empty v-else description="该源暂无技能" style="padding: 40px 0" />
           </n-tab-pane>
         </n-tabs>
-        <n-empty v-else description="暂无技能源，请添加源或自动发现" />
+        <n-empty v-else description="暂无技能源，请添加源或自动发现" style="padding: 40px 0" />
       </n-spin>
     </n-card>
 
@@ -304,7 +406,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import {
   NTag,
   NPopconfirm,
@@ -491,6 +593,46 @@ const globalSource = computed(() =>
   sources.value.find((s) => s.is_global)
 )
 
+// Count skills belonging to the global source
+const globalSkillCount = computed(() => {
+  const g = globalSource.value
+  if (!g) return 0
+  return skills.value.filter((s) => s.source_id === g.id).length
+})
+
+// Determine whether a skill belongs to the global source
+function isSkillGlobal(skill: Skill): boolean {
+  const source = sources.value.find((s) => s.id === skill.source_id)
+  return source ? toBool(source.is_global) : false
+}
+
+// Categorize a skill for color-stripe / tag display.
+// Priority: broken > global > symlink(link) > local.
+function skillType(skill: Skill): 'global' | 'local' | 'link' | 'broken' {
+  if (toBool(skill.is_broken_symlink)) return 'broken'
+  if (isSkillGlobal(skill)) return 'global'
+  if (toBool(skill.is_symlink)) return 'link'
+  return 'local'
+}
+
+function skillTypeLabel(skill: Skill): string {
+  switch (skillType(skill)) {
+    case 'broken': return '失效'
+    case 'global': return '全局'
+    case 'link': return '链接'
+    default: return '本地'
+  }
+}
+
+function skillTagType(skill: Skill): 'error' | 'info' | 'warning' | 'success' {
+  switch (skillType(skill)) {
+    case 'broken': return 'error'
+    case 'global': return 'info'
+    case 'link': return 'warning'
+    default: return 'success'
+  }
+}
+
 // Count broken symlinks across all sources
 const brokenCount = computed(() =>
   skills.value.filter((s) => toBool(s.is_broken_symlink)).length
@@ -527,146 +669,6 @@ function toBool(val: unknown): boolean {
   if (typeof val === 'string') return val === '1' || val.toLowerCase() === 'true'
   return false
 }
-
-// Table columns
-const columns = [
-  {
-    title: '名称',
-    key: 'name',
-    width: 160,
-    render: (row: Skill) =>
-      h(NTooltip, {}, {
-        trigger: () => h('span', {}, row.name),
-        default: () => row.description || row.name,
-      }),
-  },
-  {
-    title: '描述',
-    key: 'description',
-    ellipsis: { tooltip: true },
-    render: (row: Skill) => {
-      const desc = row.description || ''
-      if (desc.length <= 60) return desc || '-'
-      return desc.substring(0, 60) + '...'
-    },
-  },
-  {
-    title: '类型',
-    key: 'type',
-    width: 100,
-    render: (row: Skill) => {
-      const source = sources.value.find((s) => s.id === row.source_id)
-      if (toBool(row.is_broken_symlink)) {
-        return h(NTag, { size: 'small', type: 'error' as never }, () => '失效')
-      }
-      if (source && toBool(source.is_global)) {
-        return h(NTag, { size: 'small', type: 'info' as never }, () => '全局')
-      }
-      if (toBool(row.is_symlink)) {
-        return h(NTag, { size: 'small', type: 'warning' as never }, () => '链接')
-      }
-      return h(NTag, { size: 'small', type: 'success' as never }, () => '本地')
-    },
-  },
-  {
-    title: '链接目标',
-    key: 'link_target',
-    width: 200,
-    ellipsis: { tooltip: true },
-    render: (row: Skill) => {
-      if (!toBool(row.is_symlink) || !row.link_target) return '-'
-      return row.link_target
-    },
-  },
-  {
-    title: '操作',
-    key: 'actions',
-    width: 280,
-    align: 'center',
-    fixed: 'right' as const,
-    render: (row: Skill) => {
-      const source = sources.value.find((s) => s.id === row.source_id)
-      const isGlobal = source ? toBool(source.is_global) : false
-      const isSymlink = toBool(row.is_symlink)
-      const isBroken = toBool(row.is_broken_symlink)
-
-      const buttons: ReturnType<typeof h>[] = []
-
-      // Install to... (only for global skills)
-      if (isGlobal) {
-        buttons.push(
-          h(
-            NButton,
-            { size: 'small', quaternary: true, type: 'primary', onClick: () => openInstallTargetModal(row) },
-            () => '安装到...'
-          )
-        )
-      }
-
-      // Copy to global (non-global, non-symlink, non-broken)
-      if (!isGlobal && !isSymlink && !isBroken) {
-        buttons.push(
-          h(
-            NButton,
-            { size: 'small', quaternary: true, type: 'success', onClick: () => handleCopyToGlobal(row) },
-            () => '复制到全局'
-          )
-        )
-      }
-
-      // Edit SKILL.md
-      if (toBool(row.has_skill_md)) {
-        buttons.push(
-          h(
-            NButton,
-            { size: 'small', quaternary: true, type: 'info', onClick: () => openEditMdModal(row) },
-            () => '编辑 MD'
-          )
-        )
-      }
-
-      // Cleanup broken symlink
-      if (toBool(row.is_broken_symlink)) {
-        buttons.push(
-          h(
-            NPopconfirm,
-            { onPositiveClick: () => handleCleanupSingle(row.id) },
-            {
-              trigger: () =>
-                h(NButton, { size: 'small', quaternary: true, type: 'error' }, () => '清理'),
-              default: () => '确认清理此失效链接？',
-            }
-          )
-        )
-      }
-
-      // Uninstall (symlink only) or Delete
-      if (isSymlink && !isBroken) {
-        buttons.push(
-          h(
-            NPopconfirm,
-            { onPositiveClick: () => handleUninstall(row.id) },
-            {
-              trigger: () =>
-                h(NButton, { size: 'small', quaternary: true, type: 'warning' }, () => '卸载'),
-              default: () => '确认卸载此技能？仅删除符号链接。',
-            }
-          )
-        )
-      } else {
-        buttons.push(
-          h(
-            NButton,
-            { size: 'small', quaternary: true, type: 'error', onClick: () => handleDeleteWithCheck(row) },
-            () => '删除'
-          )
-        )
-      }
-
-      return h(NSpace, { size: 4, justify: 'center' }, () => buttons)
-    },
-  },
-]
 
 // Tab change handler
 function handleTabChange(value: string) {
@@ -857,8 +859,8 @@ async function handleUrlInstall() {
 
 function openInstallTargetModal(skill: Skill) {
   installTargetSkill.value = skill
-  // Pre-select non-global sources
-  installTargetSourceIds.value = installableSources.value.map((s) => s.id)
+  // Do not auto-select any target sources; let the user choose explicitly.
+  installTargetSourceIds.value = []
   showInstallTargetModal.value = true
 }
 
@@ -1195,11 +1197,104 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.broken-symlink-row td {
-  color: var(--error) !important;
+.skill-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
 }
-.broken-symlink-row td .n-tag {
-  color: var(--error) !important;
+.skill-stat--alert .stat-tile-value {
+  color: var(--error);
+}
+
+.skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+  padding-top: 8px;
+}
+
+.skill-card {
+  position: relative;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: box-shadow 0.2s, transform 0.15s;
+  overflow: hidden;
+}
+.skill-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.skill-card--broken {
+  opacity: 0.55;
+}
+
+.skill-card-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--success);
+}
+.skill-card[data-type='global'] .skill-card-bar {
+  background: var(--accent);
+}
+.skill-card[data-type='link'] .skill-card-bar {
+  background: var(--warning);
+}
+.skill-card[data-type='broken'] .skill-card-bar {
+  background: var(--error);
+}
+
+.skill-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.skill-card-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.skill-card-desc {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 39px;
+}
+
+.skill-card-path {
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.skill-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  margin-top: auto;
 }
 </style>
 
