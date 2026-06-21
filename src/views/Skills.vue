@@ -1352,20 +1352,24 @@ onMounted(async () => {
   font-variant-numeric: tabular-nums;
 }
 .install-source-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 .install-source-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
   background: var(--bg-elevated);
+  min-width: 0;
 }
 .install-source-item:hover {
   border-color: var(--text-3);
