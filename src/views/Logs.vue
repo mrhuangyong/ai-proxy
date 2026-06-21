@@ -33,6 +33,7 @@
         :loading="loading"
         :bordered="false"
         remote
+        :scroll-x="1600"
         :pagination="pagination"
         :row-key="(row: RequestLog) => row.id"
         @update:page="handlePageChange"
