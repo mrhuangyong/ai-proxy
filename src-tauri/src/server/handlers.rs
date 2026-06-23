@@ -22,7 +22,7 @@ use crate::converter::generators::anthropic::AnthropicGenerator;
 use crate::converter::generators::completions::CompletionsGenerator;
 use crate::converter::generators::gemini::GeminiGenerator;
 use crate::converter::generators::responses::ResponsesGenerator;
-use crate::converter::ir::{ClientFormat, IrContentPart, IrRole};
+use crate::converter::ir::{ClientFormat, IrContentPart, IrRole, IrStreamChunk};
 use crate::converter::parsers::anthropic::AnthropicParser;
 use crate::converter::parsers::completions::CompletionsParser;
 use crate::converter::parsers::gemini::GeminiParser;
@@ -1225,18 +1225,17 @@ async fn handle_proxy(
             let mut had_tool_calls = false;
             let is_anthropic = matches!(client_format, ClientFormat::Anthropic);
 
-            // Responses output item state
-            let mut resp_output_index: u32 = 0;
-            let mut resp_message_open = false;
-            let mut resp_text_part_open = false;
-            let mut resp_func_open = false;
-            let mut resp_call_id = String::new();
-            let mut resp_func_name = String::new();
-            let mut resp_accumulated_args = String::new();
-            let mut resp_accumulated_text = String::new();
-            let mut resp_thinking_started = false;
-            let mut resp_accumulated_reasoning = String::new(); // pure reasoning without tags, for cache
+            // Responses output-item lifecycle is driven by the state machine below;
+            // sequence_number stamping + lifecycle events live there.
             let is_responses = matches!(client_format, ClientFormat::Responses);
+            let mut responses_sm = if is_responses {
+                Some(ResponsesStreamStateMachine::new(
+                    response_id.to_string(),
+                    model_name.clone(),
+                ))
+            } else {
+                None
+            };
 
             let mut heartbeat_interval = tokio::time::interval(std::time::Duration::from_secs(15));
             heartbeat_interval.tick().await; // skip first immediate tick
@@ -1522,453 +1521,30 @@ async fn handle_proxy(
                         continue;
                     }
 
-                    // Handle Responses API output item lifecycle
-                    if is_responses {
-                        // Tool call start
-                        if let Some(tool_calls) = &ir_chunk.delta_tool_calls {
-                            if let Some(tc) = tool_calls.first() {
-                                if tc.id.is_some() && tc.name.is_some() {
-                                    // Emit response.created if not started
-                                    if !started {
-                                        let created = serde_json::json!({
-                                            "type": "response.created",
-                                            "response": {
-                                                "id": response_id,
-                                                "object": "response",
-                                                "status": "in_progress",
-                                                "model": model_name,
-                                                "output": [],
-                                            }
-                                        });
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                            format!("data: {}\n\n", created)
-                                        ));
-                                        started = true;
-                                    }
-                                    // Close reasoning summary before starting a tool call.
-                                    if let Some(done_sse) = close_responses_thinking_if_needed(
-                                        &mut resp_thinking_started,
-                                        &mut resp_accumulated_reasoning,
-                                        true,
-                                        &response_id,
-                                        resp_output_index,
-                                    ) {
-                                        resp_output_index += 1;
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(done_sse));
-                                    }
-
-                                    // Close text part + message if open
-                                    if resp_text_part_open {
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                            format!("data: {}\n\n", serde_json::json!({
-                                                "type": "response.output_text.done",
-                                                "output_index": resp_output_index - 1,
-                                                "content_index": 0,
-                                                "text": resp_accumulated_text,
-                                            }))
-                                        ));
-                                        resp_text_part_open = false;
-                                    }
-                                    if resp_message_open {
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                            format!("data: {}\n\n", serde_json::json!({
-                                                "type": "response.output_item.done",
-                                                "output_index": resp_output_index - 1,
-                                                "item": {
-                                                    "type": "message",
-                                                    "id": "msg_proxy",
-                                                    "role": "assistant",
-                                                    "content": [{"type": "output_text", "text": resp_accumulated_text}],
-                                                    "status": "completed",
-                                                }
-                                            }))
-                                        ));
-                                        resp_message_open = false;
-                                    }
-                                    // Close previous func_call if open
-                                    if resp_func_open {
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                            format!("data: {}\n\ndata: {}\n\n",
-                                                serde_json::json!({
-                                                    "type": "response.function_call_arguments.done",
-                                                    "output_index": resp_output_index - 1,
-                                                    "item_id": format!("fc_{}", resp_call_id),
-                                                    "call_id": resp_call_id,
-                                                    "arguments": resp_accumulated_args,
-                                                }),
-                                                serde_json::json!({
-                                                    "type": "response.output_item.done",
-                                                    "output_index": resp_output_index - 1,
-                                                    "item": {
-                                                        "type": "function_call",
-                                                        "id": format!("fc_{}", resp_call_id),
-                                                        "call_id": resp_call_id,
-                                                        "name": resp_func_name,
-                                                        "arguments": resp_accumulated_args,
-                                                    }
-                                                })
-                                            )
-                                        ));
-                                    }
-
-                                    resp_call_id = tc.id.as_deref().unwrap_or("").to_string();
-                                    resp_func_name = tc.name.as_deref().unwrap_or("").to_string();
-                                    resp_accumulated_args.clear();
-
-                                    let added = serde_json::json!({
-                                        "type": "response.output_item.added",
-                                        "output_index": resp_output_index,
-                                        "item": {
-                                            "type": "function_call",
-                                            "id": format!("fc_{}", resp_call_id),
-                                            "call_id": resp_call_id,
-                                            "name": resp_func_name,
-                                            "arguments": "",
-                                        }
-                                    });
-                                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                        format!("data: {}\n\n", added)
-                                    ));
-                                    resp_func_open = true;
-                                    had_tool_calls = true;
-                                    resp_output_index += 1;
-                                    continue;
-                                }
-                                // Argument delta
-                                if let Some(args) = &tc.arguments {
-                                    if !args.is_empty() {
-                                        resp_accumulated_args.push_str(args);
-                                        let delta_event = serde_json::json!({
-                                            "type": "response.function_call_arguments.delta",
-                                            "output_index": resp_output_index - 1,
-                                            "item_id": format!("fc_{}", resp_call_id),
-                                            "call_id": resp_call_id,
-                                            "delta": args,
-                                        });
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                            format!("data: {}\n\n", delta_event)
-                                        ));
-                                    }
-                                    continue;
-                                }
-                            }
+                    // Handle Responses API output-item lifecycle via the state machine
+                    // (sequence_number stamping + created/added/done/completed events).
+                    if let Some(sm) = responses_sm.as_mut() {
+                        for sse in sm.process_chunk(&ir_chunk, (total_prompt, total_completion)) {
+                            yield Ok::<_, std::convert::Infallible>(Bytes::from(sse));
                         }
-
-                        // Thinking / reasoning_content — output as reasoning summary events
-                        if let Some(thinking) = &ir_chunk.delta_thinking {
-                            if !thinking.is_empty() && !resp_func_open {
-                                if !resp_message_open && !resp_thinking_started {
-                                    // Emit response.created if not started
-                                    if !started {
-                                        let created = serde_json::json!({
-                                            "type": "response.created",
-                                            "response": {
-                                                "id": response_id,
-                                                "object": "response",
-                                                "status": "in_progress",
-                                                "model": model_name,
-                                                "output": [],
-                                            }
-                                        });
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                            format!("data: {}\n\n", created)
-                                        ));
-                                        started = true;
-                                    }
-                                }
-                                // First thinking chunk: emit reasoning summary part added
-                                if !resp_thinking_started {
-                                    let part_added = serde_json::json!({
-                                        "type": "response.reasoning_summary_part.added",
-                                        "output_index": resp_output_index,
-                                        "content_index": 0,
-                                        "part": {"type": "summary_text", "text": ""},
-                                        "response_id": response_id,
-                                    });
-                                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                        format!("data: {}\n\n", part_added)
-                                    ));
-                                    resp_thinking_started = true;
-                                }
-                                resp_accumulated_reasoning.push_str(thinking);
-                                let delta_event = serde_json::json!({
-                                    "type": "response.reasoning_summary_text.delta",
-                                    "output_index": resp_output_index,
-                                    "content_index": 0,
-                                    "delta": thinking,
-                                    "response_id": response_id,
-                                });
-                                yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                    format!("data: {}\n\n", delta_event)
-                                ));
-                            }
-                            continue;
-                        }
-
-                        // Text content
-                        if let Some(content) = &ir_chunk.delta_content {
-                            if !content.is_empty() && !resp_func_open {
-                                // Close reasoning summary if we were in thinking mode
-                                if let Some(done_sse) = close_responses_thinking_if_needed(
-                                    &mut resp_thinking_started,
-                                    &mut resp_accumulated_reasoning,
-                                    true,
-                                    &response_id,
-                                    resp_output_index,
-                                ) {
-                                    resp_output_index += 1;
-                                    yield Ok::<_, std::convert::Infallible>(Bytes::from(done_sse));
-                                }
-
-                                if !resp_message_open {
-                                    // Emit response.created if not started
-                                    if !started {
-                                        let created = serde_json::json!({
-                                            "type": "response.created",
-                                            "response": {
-                                                "id": response_id,
-                                                "object": "response",
-                                                "status": "in_progress",
-                                                "model": model_name,
-                                                "output": [],
-                                            }
-                                        });
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                            format!("data: {}\n\n", created)
-                                        ));
-                                    }
-                                    let item_added = serde_json::json!({
-                                        "type": "response.output_item.added",
-                                        "output_index": resp_output_index,
-                                        "item": {
-                                            "type": "message",
-                                            "id": "msg_proxy",
-                                            "role": "assistant",
-                                            "content": [],
-                                            "status": "in_progress",
-                                        }
-                                    });
-                                    let part_added = serde_json::json!({
-                                        "type": "response.content_part.added",
-                                        "output_index": resp_output_index,
-                                        "content_index": 0,
-                                        "part": {"type": "output_text", "text": ""},
-                                    });
-                                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                        format!("data: {}\n\ndata: {}\n\n", item_added, part_added)
-                                    ));
-                                    resp_message_open = true;
-                                    resp_text_part_open = true;
-                                    resp_output_index += 1;
-                                    started = true;
-                                }
-                                resp_accumulated_text.push_str(content);
-                                let delta_event = serde_json::json!({
-                                    "type": "response.output_text.delta",
-                                    "output_index": resp_output_index - 1,
-                                    "content_index": 0,
-                                    "delta": content,
-                                    "response_id": response_id,
-                                });
-                                yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                    format!("data: {}\n\n", delta_event)
-                                ));
-                            }
-                            continue;
-                        }
-
-                        // Handle upstream failure
-                        if ir_chunk.finish_reason.as_deref() == Some("failed") {
-                            if resp_text_part_open {
-                                yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                    format!("data: {}\n\n", serde_json::json!({
-                                        "type": "response.output_text.done",
-                                        "output_index": resp_output_index - 1,
-                                        "content_index": 0,
-                                        "text": resp_accumulated_text,
-                                    }))
-                                ));
-                                resp_text_part_open = false;
-                            }
-                            if resp_message_open {
-                                yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                    format!("data: {}\n\n", serde_json::json!({
-                                        "type": "response.output_item.done",
-                                        "output_index": resp_output_index - 1,
-                                        "item": {
-                                            "type": "message",
-                                            "id": "msg_proxy",
-                                            "role": "assistant",
-                                            "content": [{"type": "output_text", "text": resp_accumulated_text}],
-                                            "status": "incomplete",
-                                        }
-                                    }))
-                                ));
-                                resp_message_open = false;
-                            }
-                            if resp_func_open {
-                                yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                    format!("data: {}\n\n", serde_json::json!({
-                                        "type": "response.output_item.done",
-                                        "output_index": resp_output_index - 1,
-                                        "item": {
-                                            "type": "function_call",
-                                            "id": format!("fc_{}", resp_call_id),
-                                            "call_id": resp_call_id,
-                                            "name": resp_func_name,
-                                            "arguments": resp_accumulated_args,
-                                            "status": "incomplete",
-                                        }
-                                    }))
-                                ));
-                                resp_func_open = false;
-                            }
-
-                            let err_code = ir_chunk.error.as_ref()
-                                .and_then(|e| e.code.clone())
-                                .unwrap_or_else(|| "server_error".to_string());
-                            let err_message = ir_chunk.error.as_ref()
-                                .map(|e| e.message.clone())
-                                .unwrap_or_else(|| "upstream response failed".to_string());
-
-                            let failed_event = serde_json::json!({
-                                "type": "response.failed",
-                                "response": {
-                                    "id": response_id,
-                                    "object": "response",
-                                    "status": "failed",
-                                    "model": model_name,
-                                    "output": build_responses_output_array(
-                                        &resp_accumulated_text,
-                                        &resp_accumulated_reasoning,
-                                        resp_thinking_started,
-                                        resp_func_open,
-                                        &resp_call_id,
-                                        &resp_func_name,
-                                        &resp_accumulated_args,
-                                    ),
-                                },
-                                "error": {
-                                    "code": err_code,
-                                    "message": err_message,
-                                }
-                            });
-                            yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                format!("data: {}\n\n", failed_event)
-                            ));
-                            finished = true;
-                            continue;
-                        }
-
-                        // Finish (normal completion)
-                        if ir_chunk.finish_reason.is_some() {
-                            // Close reasoning summary if still open
-                            if let Some(done_sse) = close_responses_thinking_if_needed(
-                                &mut resp_thinking_started,
-                                &mut resp_accumulated_reasoning,
-                                false,
-                                &response_id,
-                                resp_output_index,
-                            ) {
-                                resp_output_index += 1;
-                                yield Ok::<_, std::convert::Infallible>(Bytes::from(done_sse));
-                            }
-
-                            // Close func_call if open
-                            if resp_func_open {
-                                yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                    format!("data: {}\n\ndata: {}\n\n",
-                                        serde_json::json!({
-                                            "type": "response.function_call_arguments.done",
-                                            "output_index": resp_output_index - 1,
-                                            "item_id": format!("fc_{}", resp_call_id),
-                                            "call_id": resp_call_id,
-                                            "arguments": resp_accumulated_args,
-                                        }),
-                                        serde_json::json!({
-                                            "type": "response.output_item.done",
-                                            "output_index": resp_output_index - 1,
-                                            "item": {
-                                                "type": "function_call",
-                                                "id": format!("fc_{}", resp_call_id),
-                                                "call_id": resp_call_id,
-                                                "name": resp_func_name,
-                                                "arguments": resp_accumulated_args,
-                                            }
-                                        })
-                                    )
-                                ));
-                                resp_func_open = false;
-                            }
-                            // Close message if open
-                            if resp_message_open {
-                                yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                    format!("data: {}\n\ndata: {}\n\n",
-                                        serde_json::json!({
-                                            "type": "response.output_text.done",
-                                            "output_index": resp_output_index - 1,
-                                            "content_index": 0,
-                                            "text": resp_accumulated_text,
-                                        }),
-                                        serde_json::json!({
-                                            "type": "response.output_item.done",
-                                            "output_index": resp_output_index - 1,
-                                            "item": {
-                                                "type": "message",
-                                                "id": "msg_proxy",
-                                                "role": "assistant",
-                                                "content": [{"type": "output_text", "text": resp_accumulated_text}],
-                                                "status": "completed",
-                                            }
-                                        })
-                                    )
-                                ));
-                                resp_message_open = false;
-                            }
-
-                            let completed = serde_json::json!({
-                                "type": "response.completed",
-                                "response": {
-                                    "id": response_id,
-                                    "object": "response",
-                                    "status": "completed",
-                                    "model": model_name,
-                                    "output": build_responses_output_array(
-                                        &resp_accumulated_text,
-                                        &resp_accumulated_reasoning,
-                                        resp_thinking_started,
-                                        resp_func_open,
-                                        &resp_call_id,
-                                        &resp_func_name,
-                                        &resp_accumulated_args,
-                                    ),
-                                    "usage": {
-                                        "input_tokens": total_prompt,
-                                        "output_tokens": total_completion,
-                                        "total_tokens": total_prompt + total_completion,
-                                    }
-                                }
-                            });
-                            yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                format!("data: {}\n\n", completed)
-                            ));
-
-                            // Store accumulated reasoning in cache for multi-turn
-                            if !resp_accumulated_reasoning.is_empty() {
+                        if sm.is_finished() {
+                            // Store accumulated reasoning in cache for multi-turn reuse.
+                            let reasoning = sm.accumulated_reasoning().to_string();
+                            if !reasoning.is_empty() {
                                 if let Ok(mut cache) = REASONING_CACHE.lock() {
-                                    cache.insert(response_id.to_string(), resp_accumulated_reasoning.clone());
+                                    cache.insert(response_id.to_string(), reasoning);
                                     // Evict old entries (keep last 50)
                                     if cache.len() > 50 {
-                                        let keys: Vec<String> = cache.keys().take(cache.len() - 50).cloned().collect();
-                                        for k in keys { cache.remove(&k); }
+                                        let keys: Vec<String> =
+                                            cache.keys().take(cache.len() - 50).cloned().collect();
+                                        for k in keys {
+                                            cache.remove(&k);
+                                        }
                                     }
                                 }
                             }
-
                             finished = true;
-                            continue;
                         }
-
                         continue;
                     }
 
@@ -2023,40 +1599,13 @@ async fn handle_proxy(
                                     if usage.prompt_tokens > 0 { total_prompt = usage.prompt_tokens; total_cached = usage.cached_tokens; }
                                     if usage.completion_tokens > 0 { total_completion = usage.completion_tokens; }
                                 }
-                                if is_responses {
-                                    // For Responses format, only handle finish events from remaining buffer
-                                    if ir_chunk.finish_reason.as_deref() == Some("failed") {
-                                        let err_code = ir_chunk.error.as_ref()
-                                            .and_then(|e| e.code.clone())
-                                            .unwrap_or_else(|| "server_error".to_string());
-                                        let err_message = ir_chunk.error.as_ref()
-                                            .map(|e| e.message.clone())
-                                            .unwrap_or_else(|| "upstream response failed".to_string());
-                                        let failed_event = serde_json::json!({
-                                            "type": "response.failed",
-                                            "response": {
-                                                "id": response_id,
-                                                "object": "response",
-                                                "status": "failed",
-                                                "model": model_name,
-                                                "output": build_responses_output_array(
-                                                    &resp_accumulated_text,
-                                                    &resp_accumulated_reasoning,
-                                                    resp_thinking_started,
-                                                    resp_func_open,
-                                                    &resp_call_id,
-                                                    &resp_func_name,
-                                                    &resp_accumulated_args,
-                                                ),
-                                            },
-                                            "error": {
-                                                "code": err_code,
-                                                "message": err_message,
-                                            }
-                                        });
-                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                                            format!("data: {}\n\n", failed_event)
-                                        ));
+                                if let Some(sm) = responses_sm.as_mut() {
+                                    // Delegate any remaining Responses lifecycle event
+                                    // (failed / completed / trailing content) to the state machine.
+                                    for sse in sm.process_chunk(&ir_chunk, (total_prompt, total_completion)) {
+                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(sse));
+                                    }
+                                    if sm.is_finished() {
                                         finished = true;
                                     }
                                 } else {
@@ -2114,117 +1663,18 @@ async fn handle_proxy(
                     ));
                 }
             }
-            if is_responses && started && !finished {
-                // Kimi 等非标准端点可能不发送 message_stop/message_delta，
-                // 但已经发送了实际内容。如果有内容，视为正常完成。
-                let has_content = !resp_accumulated_text.is_empty()
-                    || !resp_accumulated_args.is_empty()
-                    || resp_thinking_started;
-
-                // Close open items first
-                if resp_func_open {
-                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                        format!("data: {}\n\n", serde_json::json!({
-                            "type": "response.output_item.done",
-                            "output_index": resp_output_index - 1,
-                            "item": {
-                                "type": "function_call",
-                                "id": format!("fc_{}", resp_call_id),
-                                "call_id": resp_call_id,
-                                "name": resp_func_name,
-                                "arguments": resp_accumulated_args,
-                            }
-                        }))
-                    ));
-                    resp_func_open = false;
-                }
-                if resp_message_open {
-                    if resp_text_part_open {
-                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                            format!("data: {}\n\n", serde_json::json!({
-                                "type": "response.output_text.done",
-                                "output_index": resp_output_index - 1,
-                                "content_index": 0,
-                                "text": resp_accumulated_text,
-                            }))
-                        ));
-                        resp_text_part_open = false;
+            if let Some(sm) = responses_sm.as_mut() {
+                if sm.is_started() && !sm.is_finished() {
+                    // Kimi 等非标准端点可能不发送 message_stop/message_delta，
+                    // 但已经发送了实际内容。如果有内容，视为正常完成。
+                    if sm.had_content() {
+                        tracing::info!(
+                            "Stream completed without proper termination, synthesizing response.completed from accumulated content"
+                        );
                     }
-                    let status = if has_content { "completed" } else { "incomplete" };
-                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                        format!("data: {}\n\n", serde_json::json!({
-                            "type": "response.output_item.done",
-                            "output_index": resp_output_index - 1,
-                            "item": {
-                                "type": "message",
-                                "id": "msg_proxy",
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": resp_accumulated_text}],
-                                "status": status,
-                            }
-                        }))
-                    ));
-                    resp_message_open = false;
-                }
-
-                if has_content {
-                    // Graceful completion: upstream sent content but no proper termination
-                    tracing::info!("Stream completed without proper termination, synthesizing response.completed from accumulated content");
-                    let completed = serde_json::json!({
-                        "type": "response.completed",
-                        "response": {
-                            "id": response_id,
-                            "object": "response",
-                            "status": "completed",
-                            "model": model_name,
-                            "output": build_responses_output_array(
-                                &resp_accumulated_text,
-                                &resp_accumulated_reasoning,
-                                resp_thinking_started,
-                                resp_func_open,
-                                &resp_call_id,
-                                &resp_func_name,
-                                &resp_accumulated_args,
-                            ),
-                            "usage": {
-                                "input_tokens": total_prompt,
-                                "output_tokens": total_completion,
-                                "total_tokens": total_prompt + total_completion,
-                            }
-                        }
-                    });
-                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                        format!("data: {}\n\n", completed)
-                    ));
-                    finished = true;
-                } else {
-                    // No content at all — report failure
-                    let failed_output = build_responses_output_array(
-                        &resp_accumulated_text,
-                        &resp_accumulated_reasoning,
-                        resp_thinking_started,
-                        resp_func_open,
-                        &resp_call_id,
-                        &resp_func_name,
-                        &resp_accumulated_args,
-                    );
-                    let failed_event = serde_json::json!({
-                        "type": "response.failed",
-                        "response": {
-                            "id": response_id,
-                            "object": "response",
-                            "status": "failed",
-                            "model": model_name,
-                            "output": failed_output,
-                        },
-                        "error": {
-                            "code": "server_error",
-                            "message": "stream disconnected before completion",
-                        }
-                    });
-                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
-                        format!("data: {}\n\n", failed_event)
-                    ));
+                    for sse in sm.finish_on_stream_end(sm.had_content(), (total_prompt, total_completion)) {
+                        yield Ok::<_, std::convert::Infallible>(Bytes::from(sse));
+                    }
                     finished = true;
                 }
             }
@@ -2729,29 +2179,574 @@ impl Drop for StreamLoggingGuard {
 /// Split `<thinking>...</thinking>` from text.
 /// Returns (thinking_content, remaining_text).
 /// Emit reasoning summary done event when thinking ends.
-fn close_responses_thinking_if_needed(
-    thinking_started: &mut bool,
-    accumulated_reasoning: &mut String,
-    _append_newline: bool,
-    response_id: &str,
+/// Responses API streaming state machine.
+///
+/// Encapsulates the conversion of incoming `IrStreamChunk`s into the OpenAI
+/// Responses SSE lifecycle (response.created → output_item.added →
+/// content_part.added → ...delta... → output_text.done → output_item.done →
+/// response.completed), including reasoning-summary and function-call items.
+///
+/// Every emitted event carries a strictly-increasing `sequence_number`
+/// (required by the Responses streaming protocol; clients like codex rely on
+/// it to order/dedupe events). Extracted from the inline `async_stream` body
+/// so the lifecycle can be unit-tested in isolation.
+pub struct ResponsesStreamStateMachine {
+    response_id: String,
+    model: String,
+    seq: u64,
+    started: bool,
+    finished: bool,
+    // Responses output item state
     output_index: u32,
-) -> Option<String> {
-    if !*thinking_started {
-        return None;
+    message_open: bool,
+    text_part_open: bool,
+    func_open: bool,
+    call_id: String,
+    func_name: String,
+    accumulated_args: String,
+    accumulated_text: String,
+    thinking_started: bool,
+    /// pure reasoning without tags, for cache
+    accumulated_reasoning: String,
+}
+
+impl ResponsesStreamStateMachine {
+    pub fn new(response_id: String, model: String) -> Self {
+        Self {
+            response_id,
+            model,
+            seq: 0,
+            started: false,
+            finished: false,
+            output_index: 0,
+            message_open: false,
+            text_part_open: false,
+            func_open: false,
+            call_id: String::new(),
+            func_name: String::new(),
+            accumulated_args: String::new(),
+            accumulated_text: String::new(),
+            thinking_started: false,
+            accumulated_reasoning: String::new(),
+        }
     }
 
-    *thinking_started = false;
-    let done_event = serde_json::json!({
-        "type": "response.reasoning_summary_part.done",
-        "output_index": output_index,
-        "content_index": 0,
-        "part": {
-            "type": "summary_text",
-            "text": accumulated_reasoning.clone(),
-        },
-        "response_id": response_id,
-    });
-    Some(format!("data: {}\n\n", done_event))
+    pub fn is_started(&self) -> bool {
+        self.started
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Whether any content (text / tool args / reasoning) was accumulated.
+    pub fn had_content(&self) -> bool {
+        !self.accumulated_text.is_empty()
+            || !self.accumulated_args.is_empty()
+            || self.thinking_started
+    }
+
+    /// Accumulated reasoning text (without tags), for the reasoning cache.
+    pub fn accumulated_reasoning(&self) -> &str {
+        &self.accumulated_reasoning
+    }
+
+    /// Build an SSE `data: {...}\n\n` line, stamping a strictly-increasing
+    /// `sequence_number` onto the event.
+    fn ev(&mut self, mut v: serde_json::Value) -> String {
+        v["sequence_number"] = serde_json::json!(self.seq);
+        self.seq += 1;
+        format!("data: {}\n\n", v)
+    }
+
+    fn ensure_created(&mut self, out: &mut Vec<String>) {
+        if !self.started {
+            out.push(self.ev(serde_json::json!({
+                "type": "response.created",
+                "response": {
+                    "id": self.response_id,
+                    "object": "response",
+                    "status": "in_progress",
+                    "model": self.model,
+                    "output": [],
+                }
+            })));
+            self.started = true;
+        }
+    }
+
+    /// Close an open reasoning-summary part (reasoning_summary_part.done),
+    /// advancing the output index. Returns the done event if thinking was open.
+    fn close_thinking(&mut self) -> Option<String> {
+        if !self.thinking_started {
+            return None;
+        }
+        self.thinking_started = false;
+        let done = serde_json::json!({
+            "type": "response.reasoning_summary_part.done",
+            "output_index": self.output_index,
+            "content_index": 0,
+            "part": {
+                "type": "summary_text",
+                "text": self.accumulated_reasoning.clone(),
+            },
+            "response_id": self.response_id,
+        });
+        Some(self.ev(done))
+    }
+
+    /// Process one IR chunk into 0..N SSE events.
+    ///
+    /// Mirrors the previous inline `is_responses` branch in `handle_proxy`.
+    /// `usage_totals` is stamped onto the terminal `response.completed` event.
+    pub fn process_chunk(
+        &mut self,
+        chunk: &IrStreamChunk,
+        usage_totals: (u32, u32),
+    ) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+
+        // --- Tool call start (id + name) ---
+        if let Some(tool_calls) = &chunk.delta_tool_calls {
+            if let Some(tc) = tool_calls.first() {
+                if tc.id.is_some() && tc.name.is_some() {
+                    self.ensure_created(&mut out);
+
+                    // Close reasoning summary before starting a tool call.
+                    if let Some(done_sse) = self.close_thinking() {
+                        out.push(done_sse);
+                        self.output_index += 1;
+                    }
+
+                    // Close text part + message if open
+                    if self.text_part_open {
+                        out.push(self.ev(serde_json::json!({
+                            "type": "response.output_text.done",
+                            "output_index": self.output_index - 1,
+                            "content_index": 0,
+                            "text": self.accumulated_text,
+                        })));
+                        self.text_part_open = false;
+                    }
+                    if self.message_open {
+                        out.push(self.ev(serde_json::json!({
+                            "type": "response.output_item.done",
+                            "output_index": self.output_index - 1,
+                            "item": {
+                                "type": "message",
+                                "id": "msg_proxy",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": self.accumulated_text}],
+                                "status": "completed",
+                            }
+                        })));
+                        self.message_open = false;
+                    }
+                    // Close previous func_call if open
+                    if self.func_open {
+                        let done_args = self.ev(serde_json::json!({
+                            "type": "response.function_call_arguments.done",
+                            "output_index": self.output_index - 1,
+                            "item_id": format!("fc_{}", self.call_id),
+                            "call_id": self.call_id,
+                            "arguments": self.accumulated_args,
+                        }));
+                        let item_done = self.ev(serde_json::json!({
+                            "type": "response.output_item.done",
+                            "output_index": self.output_index - 1,
+                            "item": {
+                                "type": "function_call",
+                                "id": format!("fc_{}", self.call_id),
+                                "call_id": self.call_id,
+                                "name": self.func_name,
+                                "arguments": self.accumulated_args,
+                            }
+                        }));
+                        out.push(done_args);
+                        out.push(item_done);
+                    }
+
+                    self.call_id = tc.id.as_deref().unwrap_or("").to_string();
+                    self.func_name = tc.name.as_deref().unwrap_or("").to_string();
+                    self.accumulated_args.clear();
+
+                    out.push(self.ev(serde_json::json!({
+                        "type": "response.output_item.added",
+                        "output_index": self.output_index,
+                        "item": {
+                            "type": "function_call",
+                            "id": format!("fc_{}", self.call_id),
+                            "call_id": self.call_id,
+                            "name": self.func_name,
+                            "arguments": "",
+                        }
+                    })));
+                    self.func_open = true;
+                    self.output_index += 1;
+                    return out;
+                }
+                // Argument delta
+                if let Some(args) = &tc.arguments {
+                    if !args.is_empty() {
+                        self.accumulated_args.push_str(args);
+                        out.push(self.ev(serde_json::json!({
+                            "type": "response.function_call_arguments.delta",
+                            "output_index": self.output_index - 1,
+                            "item_id": format!("fc_{}", self.call_id),
+                            "call_id": self.call_id,
+                            "delta": args,
+                        })));
+                    }
+                    return out;
+                }
+            }
+        }
+
+        // --- Thinking / reasoning_content → reasoning summary events ---
+        if let Some(thinking) = &chunk.delta_thinking {
+            if !thinking.is_empty() && !self.func_open {
+                if !self.message_open && !self.thinking_started {
+                    self.ensure_created(&mut out);
+                }
+                if !self.thinking_started {
+                    out.push(self.ev(serde_json::json!({
+                        "type": "response.reasoning_summary_part.added",
+                        "output_index": self.output_index,
+                        "content_index": 0,
+                        "part": {"type": "summary_text", "text": ""},
+                        "response_id": self.response_id,
+                    })));
+                    self.thinking_started = true;
+                }
+                self.accumulated_reasoning.push_str(thinking);
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "output_index": self.output_index,
+                    "content_index": 0,
+                    "delta": thinking,
+                    "response_id": self.response_id,
+                })));
+            }
+            return out;
+        }
+
+        // --- Text content ---
+        if let Some(content) = &chunk.delta_content {
+            if !content.is_empty() && !self.func_open {
+                if let Some(done_sse) = self.close_thinking() {
+                    out.push(done_sse);
+                    self.output_index += 1;
+                }
+
+                if !self.message_open {
+                    self.ensure_created(&mut out);
+                    out.push(self.ev(serde_json::json!({
+                        "type": "response.output_item.added",
+                        "output_index": self.output_index,
+                        "item": {
+                            "type": "message",
+                            "id": "msg_proxy",
+                            "role": "assistant",
+                            "content": [],
+                            "status": "in_progress",
+                        }
+                    })));
+                    out.push(self.ev(serde_json::json!({
+                        "type": "response.content_part.added",
+                        "output_index": self.output_index,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": ""},
+                    })));
+                    self.message_open = true;
+                    self.text_part_open = true;
+                    self.output_index += 1;
+                }
+                self.accumulated_text.push_str(content);
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.output_text.delta",
+                    "output_index": self.output_index - 1,
+                    "content_index": 0,
+                    "delta": content,
+                    "response_id": self.response_id,
+                })));
+            }
+            return out;
+        }
+
+        // --- Upstream failure ---
+        if chunk.finish_reason.as_deref() == Some("failed") {
+            if self.text_part_open {
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.output_text.done",
+                    "output_index": self.output_index - 1,
+                    "content_index": 0,
+                    "text": self.accumulated_text,
+                })));
+                self.text_part_open = false;
+            }
+            if self.message_open {
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.output_item.done",
+                    "output_index": self.output_index - 1,
+                    "item": {
+                        "type": "message",
+                        "id": "msg_proxy",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": self.accumulated_text}],
+                        "status": "incomplete",
+                    }
+                })));
+                self.message_open = false;
+            }
+            if self.func_open {
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.output_item.done",
+                    "output_index": self.output_index - 1,
+                    "item": {
+                        "type": "function_call",
+                        "id": format!("fc_{}", self.call_id),
+                        "call_id": self.call_id,
+                        "name": self.func_name,
+                        "arguments": self.accumulated_args,
+                        "status": "incomplete",
+                    }
+                })));
+                self.func_open = false;
+            }
+
+            let err_code = chunk
+                .error
+                .as_ref()
+                .and_then(|e| e.code.clone())
+                .unwrap_or_else(|| "server_error".to_string());
+            let err_message = chunk
+                .error
+                .as_ref()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "upstream response failed".to_string());
+
+            out.push(self.ev(serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": self.response_id,
+                    "object": "response",
+                    "status": "failed",
+                    "model": self.model,
+                    "output": build_responses_output_array(
+                        &self.accumulated_text,
+                        &self.accumulated_reasoning,
+                        self.thinking_started,
+                        self.func_open,
+                        &self.call_id,
+                        &self.func_name,
+                        &self.accumulated_args,
+                    ),
+                },
+                "error": {
+                    "code": err_code,
+                    "message": err_message,
+                }
+            })));
+            self.finished = true;
+            return out;
+        }
+
+        // --- Normal completion ---
+        if chunk.finish_reason.is_some() {
+            // Close reasoning summary if still open
+            if let Some(done_sse) = self.close_thinking() {
+                out.push(done_sse);
+                self.output_index += 1;
+            }
+
+            // Close func_call if open
+            if self.func_open {
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.function_call_arguments.done",
+                    "output_index": self.output_index - 1,
+                    "item_id": format!("fc_{}", self.call_id),
+                    "call_id": self.call_id,
+                    "arguments": self.accumulated_args,
+                })));
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.output_item.done",
+                    "output_index": self.output_index - 1,
+                    "item": {
+                        "type": "function_call",
+                        "id": format!("fc_{}", self.call_id),
+                        "call_id": self.call_id,
+                        "name": self.func_name,
+                        "arguments": self.accumulated_args,
+                    }
+                })));
+                self.func_open = false;
+            }
+            // Close message if open
+            if self.message_open {
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.output_text.done",
+                    "output_index": self.output_index - 1,
+                    "content_index": 0,
+                    "text": self.accumulated_text,
+                })));
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.output_item.done",
+                    "output_index": self.output_index - 1,
+                    "item": {
+                        "type": "message",
+                        "id": "msg_proxy",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": self.accumulated_text}],
+                        "status": "completed",
+                    }
+                })));
+                self.message_open = false;
+            }
+
+            out.push(self.ev(serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": self.response_id,
+                    "object": "response",
+                    "status": "completed",
+                    "model": self.model,
+                    "output": build_responses_output_array(
+                        &self.accumulated_text,
+                        &self.accumulated_reasoning,
+                        self.thinking_started,
+                        self.func_open,
+                        &self.call_id,
+                        &self.func_name,
+                        &self.accumulated_args,
+                    ),
+                    "usage": {
+                        "input_tokens": usage_totals.0,
+                        "output_tokens": usage_totals.1,
+                        "total_tokens": usage_totals.0 + usage_totals.1,
+                    }
+                }
+            })));
+            self.finished = true;
+            return out;
+        }
+
+        out
+    }
+
+    /// Synthesize close/completed events when the upstream stream ended
+    /// without a proper termination event (or with one left in the buffer).
+    ///
+    /// `had_content` controls the final message status (completed vs incomplete)
+    /// when no proper finish event was observed.
+    pub fn finish_on_stream_end(
+        &mut self,
+        had_content: bool,
+        usage_totals: (u32, u32),
+    ) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+
+        if !self.started {
+            return out;
+        }
+        if self.finished {
+            return out;
+        }
+
+        // Close open items first
+        if self.func_open {
+            out.push(self.ev(serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": self.output_index - 1,
+                "item": {
+                    "type": "function_call",
+                    "id": format!("fc_{}", self.call_id),
+                    "call_id": self.call_id,
+                    "name": self.func_name,
+                    "arguments": self.accumulated_args,
+                }
+            })));
+            self.func_open = false;
+        }
+        if self.message_open {
+            if self.text_part_open {
+                out.push(self.ev(serde_json::json!({
+                    "type": "response.output_text.done",
+                    "output_index": self.output_index - 1,
+                    "content_index": 0,
+                    "text": self.accumulated_text,
+                })));
+                self.text_part_open = false;
+            }
+            let status = if had_content {
+                "completed"
+            } else {
+                "incomplete"
+            };
+            out.push(self.ev(serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": self.output_index - 1,
+                "item": {
+                    "type": "message",
+                    "id": "msg_proxy",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": self.accumulated_text}],
+                    "status": status,
+                }
+            })));
+            self.message_open = false;
+        }
+
+        if had_content {
+            out.push(self.ev(serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": self.response_id,
+                    "object": "response",
+                    "status": "completed",
+                    "model": self.model,
+                    "output": build_responses_output_array(
+                        &self.accumulated_text,
+                        &self.accumulated_reasoning,
+                        self.thinking_started,
+                        self.func_open,
+                        &self.call_id,
+                        &self.func_name,
+                        &self.accumulated_args,
+                    ),
+                    "usage": {
+                        "input_tokens": usage_totals.0,
+                        "output_tokens": usage_totals.1,
+                        "total_tokens": usage_totals.0 + usage_totals.1,
+                    }
+                }
+            })));
+        } else {
+            out.push(self.ev(serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": self.response_id,
+                    "object": "response",
+                    "status": "failed",
+                    "model": self.model,
+                    "output": build_responses_output_array(
+                        &self.accumulated_text,
+                        &self.accumulated_reasoning,
+                        self.thinking_started,
+                        self.func_open,
+                        &self.call_id,
+                        &self.func_name,
+                        &self.accumulated_args,
+                    ),
+                },
+                "error": {
+                    "code": "server_error",
+                    "message": "stream disconnected before completion",
+                }
+            })));
+        }
+        self.finished = true;
+        out
+    }
 }
 
 fn build_responses_output_array(
@@ -2893,31 +2888,9 @@ enum EitherBody {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        close_responses_thinking_if_needed, inject_cached_reasoning_into_assistant_messages,
-    };
+    use super::inject_cached_reasoning_into_assistant_messages;
     use crate::converter::ir::{IrContentPart, IrMessage, IrRole};
     use std::collections::HashMap;
-
-    #[test]
-    fn closes_thinking_before_tool_call_boundary() {
-        let mut thinking_started = true;
-        let mut accumulated_reasoning = "repo analysis".to_string();
-
-        let done_sse = close_responses_thinking_if_needed(
-            &mut thinking_started,
-            &mut accumulated_reasoning,
-            true,
-            "resp_test",
-            0,
-        );
-
-        assert!(done_sse.is_some());
-        assert!(!thinking_started);
-        let sse = done_sse.unwrap();
-        assert!(sse.contains("response.reasoning_summary_part.done"));
-        assert!(sse.contains("repo analysis"));
-    }
 
     #[test]
     fn injects_cached_reasoning_when_previous_response_id_missing() {
