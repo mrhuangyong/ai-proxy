@@ -2206,6 +2206,8 @@ pub struct ResponsesStreamStateMachine {
     accumulated_args: String,
     accumulated_text: String,
     thinking_started: bool,
+    /// whether a reasoning output item has been added but not yet done
+    reasoning_item_open: bool,
     /// pure reasoning without tags, for cache
     accumulated_reasoning: String,
 }
@@ -2227,6 +2229,7 @@ impl ResponsesStreamStateMachine {
             accumulated_args: String::new(),
             accumulated_text: String::new(),
             thinking_started: false,
+            reasoning_item_open: false,
             accumulated_reasoning: String::new(),
         }
     }
@@ -2275,24 +2278,45 @@ impl ResponsesStreamStateMachine {
         }
     }
 
-    /// Close an open reasoning-summary part (reasoning_summary_part.done),
-    /// advancing the output index. Returns the done event if thinking was open.
-    fn close_thinking(&mut self) -> Option<String> {
+    /// Close an open reasoning item: emit `reasoning_summary_part.done` then
+    /// `output_item.done` for the reasoning item. Returns empty vec if no
+    /// reasoning item was open. Caller advances output_index after these events.
+    fn close_thinking(&mut self) -> Vec<String> {
         if !self.thinking_started {
-            return None;
+            return Vec::new();
         }
         self.thinking_started = false;
-        let done = serde_json::json!({
+        // The reasoning item lives at the current output_index (its `added`
+        // event does not advance output_index; the caller advances it after
+        // close_thinking, same convention as the original design).
+        let idx = self.output_index;
+        let mut out = Vec::new();
+        out.push(self.ev(serde_json::json!({
             "type": "response.reasoning_summary_part.done",
-            "output_index": self.output_index,
+            "output_index": idx,
             "content_index": 0,
+            "item_id": "rs_proxy",
             "part": {
                 "type": "summary_text",
                 "text": self.accumulated_reasoning.clone(),
             },
             "response_id": self.response_id,
-        });
-        Some(self.ev(done))
+        })));
+        // Close the reasoning output item itself.
+        if self.reasoning_item_open {
+            out.push(self.ev(serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": idx,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_proxy",
+                    "summary": [{"type": "summary_text", "text": self.accumulated_reasoning.clone()}],
+                    "status": "completed",
+                }
+            })));
+            self.reasoning_item_open = false;
+        }
+        out
     }
 
     /// Process one IR chunk into 0..N SSE events.
@@ -2313,8 +2337,9 @@ impl ResponsesStreamStateMachine {
                     self.ensure_created(&mut out);
 
                     // Close reasoning summary before starting a tool call.
-                    if let Some(done_sse) = self.close_thinking() {
-                        out.push(done_sse);
+                    let thinking_done = self.close_thinking();
+                    if !thinking_done.is_empty() {
+                        out.extend(thinking_done);
                         self.output_index += 1;
                     }
 
@@ -2324,6 +2349,7 @@ impl ResponsesStreamStateMachine {
                             "type": "response.output_text.done",
                             "output_index": self.output_index - 1,
                             "content_index": 0,
+                            "item_id": "msg_proxy",
                             "text": self.accumulated_text,
                         })));
                         self.text_part_open = false;
@@ -2409,10 +2435,25 @@ impl ResponsesStreamStateMachine {
                     self.ensure_created(&mut out);
                 }
                 if !self.thinking_started {
+                    // Open the reasoning output item first.
+                    if !self.reasoning_item_open {
+                        out.push(self.ev(serde_json::json!({
+                            "type": "response.output_item.added",
+                            "output_index": self.output_index,
+                            "item": {
+                                "type": "reasoning",
+                                "id": "rs_proxy",
+                                "summary": [],
+                                "status": "in_progress",
+                            }
+                        })));
+                        self.reasoning_item_open = true;
+                    }
                     out.push(self.ev(serde_json::json!({
                         "type": "response.reasoning_summary_part.added",
                         "output_index": self.output_index,
                         "content_index": 0,
+                        "item_id": "rs_proxy",
                         "part": {"type": "summary_text", "text": ""},
                         "response_id": self.response_id,
                     })));
@@ -2423,6 +2464,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.reasoning_summary_text.delta",
                     "output_index": self.output_index,
                     "content_index": 0,
+                    "item_id": "rs_proxy",
                     "delta": thinking,
                     "response_id": self.response_id,
                 })));
@@ -2433,8 +2475,9 @@ impl ResponsesStreamStateMachine {
         // --- Text content ---
         if let Some(content) = &chunk.delta_content {
             if !content.is_empty() && !self.func_open {
-                if let Some(done_sse) = self.close_thinking() {
-                    out.push(done_sse);
+                let thinking_done = self.close_thinking();
+                if !thinking_done.is_empty() {
+                    out.extend(thinking_done);
                     self.output_index += 1;
                 }
 
@@ -2455,6 +2498,7 @@ impl ResponsesStreamStateMachine {
                         "type": "response.content_part.added",
                         "output_index": self.output_index,
                         "content_index": 0,
+                        "item_id": "msg_proxy",
                         "part": {"type": "output_text", "text": ""},
                     })));
                     self.message_open = true;
@@ -2466,6 +2510,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.output_text.delta",
                     "output_index": self.output_index - 1,
                     "content_index": 0,
+                    "item_id": "msg_proxy",
                     "delta": content,
                     "response_id": self.response_id,
                 })));
@@ -2480,6 +2525,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.output_text.done",
                     "output_index": self.output_index - 1,
                     "content_index": 0,
+                    "item_id": "msg_proxy",
                     "text": self.accumulated_text,
                 })));
                 self.text_part_open = false;
@@ -2554,8 +2600,9 @@ impl ResponsesStreamStateMachine {
         // --- Normal completion ---
         if chunk.finish_reason.is_some() {
             // Close reasoning summary if still open
-            if let Some(done_sse) = self.close_thinking() {
-                out.push(done_sse);
+            let thinking_done = self.close_thinking();
+            if !thinking_done.is_empty() {
+                out.extend(thinking_done);
                 self.output_index += 1;
             }
 
@@ -2587,6 +2634,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.output_text.done",
                     "output_index": self.output_index - 1,
                     "content_index": 0,
+                    "item_id": "msg_proxy",
                     "text": self.accumulated_text,
                 })));
                 out.push(self.ev(serde_json::json!({
@@ -2673,6 +2721,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.output_text.done",
                     "output_index": self.output_index - 1,
                     "content_index": 0,
+                    "item_id": "msg_proxy",
                     "text": self.accumulated_text,
                 })));
                 self.text_part_open = false;
