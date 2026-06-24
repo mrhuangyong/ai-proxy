@@ -140,7 +140,6 @@ fn case_a_plain_text_lifecycle_is_complete_and_ordered() {
 
     // output_text.done carries the *full accumulated* text (not a fragment)
     assert_eq!(frames[5]["text"].as_str(), Some("Hello, world!"));
-
     // output_item.done carries the full text in its content too
     assert_eq!(
         frames[6]["item"]["content"][0]["text"].as_str(),
@@ -154,6 +153,12 @@ fn case_a_plain_text_lifecycle_is_complete_and_ordered() {
         completed_output[0]["content"][0]["text"].as_str(),
         Some("Hello, world!")
     );
+
+    // item_id must be present on all message delta/done/part events so codex
+    // can associate them with the active message item.
+    assert_eq!(frames[2]["item_id"].as_str(), Some("msg_proxy")); // content_part.added
+    assert_eq!(frames[3]["item_id"].as_str(), Some("msg_proxy")); // output_text.delta
+    assert_eq!(frames[5]["item_id"].as_str(), Some("msg_proxy")); // output_text.done
 
     assert_strict_sequence(&frames);
 }
@@ -177,11 +182,13 @@ fn case_b_reasoning_then_text_keeps_indices_disjoint() {
     assert_eq!(
         types,
         vec![
-            // reasoning summary part
+            // reasoning output item (its own added/done envelope)
             "response.created",
+            "response.output_item.added",
             "response.reasoning_summary_part.added",
             "response.reasoning_summary_text.delta",
             "response.reasoning_summary_part.done",
+            "response.output_item.done",
             // text message part
             "response.output_item.added",
             "response.content_part.added",
@@ -194,15 +201,34 @@ fn case_b_reasoning_then_text_keeps_indices_disjoint() {
         types
     );
 
-    // reasoning delta text preserved
-    assert_eq!(frames[2]["delta"].as_str(), Some("analyzing..."));
+    // reasoning item added/done envelope is type=reasoning
+    assert_eq!(frames[1]["item"]["type"].as_str(), Some("reasoning"));
+    assert_eq!(frames[1]["item"]["id"].as_str(), Some("rs_proxy"));
+    assert_eq!(frames[5]["item"]["type"].as_str(), Some("reasoning"));
 
-    // reasoning done carries full accumulated reasoning
-    assert_eq!(frames[3]["part"]["text"].as_str(), Some("analyzing..."));
+    // reasoning summary events carry item_id so codex can bind them
+    assert_eq!(frames[2]["item_id"].as_str(), Some("rs_proxy"));
+    assert_eq!(frames[3]["delta"].as_str(), Some("analyzing..."));
+    assert_eq!(frames[3]["item_id"].as_str(), Some("rs_proxy"));
+    assert_eq!(frames[4]["part"]["text"].as_str(), Some("analyzing..."));
+    assert_eq!(frames[4]["item_id"].as_str(), Some("rs_proxy"));
 
-    // text part still correct
-    assert_eq!(frames[6]["delta"].as_str(), Some("answer"));
-    assert_eq!(frames[7]["text"].as_str(), Some("answer"));
+    // reasoning item done carries full summary
+    assert_eq!(
+        frames[5]["item"]["summary"][0]["text"].as_str(),
+        Some("analyzing...")
+    );
+
+    // text part still correct + carries msg_proxy item_id
+    assert_eq!(frames[6]["item"]["type"].as_str(), Some("message"));
+    assert_eq!(frames[8]["delta"].as_str(), Some("answer"));
+    assert_eq!(frames[8]["item_id"].as_str(), Some("msg_proxy"));
+    assert_eq!(frames[9]["text"].as_str(), Some("answer"));
+    assert_eq!(frames[9]["item_id"].as_str(), Some("msg_proxy"));
+
+    // reasoning output_index (0..5) disjoint from message output_index (6..10)
+    assert_eq!(frames[1]["output_index"].as_i64(), Some(0));
+    assert_eq!(frames[6]["output_index"].as_i64(), Some(1));
 
     assert_strict_sequence(&frames);
 }
