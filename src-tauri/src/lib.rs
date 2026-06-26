@@ -11,6 +11,7 @@ pub mod routing;
 pub mod server;
 pub mod skill;
 pub mod usage;
+pub mod virtual_model;
 
 #[cfg(feature = "desktop")]
 pub mod apps;

@@ -71,6 +71,28 @@ fn parse_model_config(
         .unwrap_or((None, None, None, None))
 }
 
+// ── Virtual model detection ────────────────────────────────────────────────
+
+/// Check whether any of the given model names is an enabled virtual model.
+async fn any_virtual_model(names: &[&str]) -> bool {
+    if names.is_empty() {
+        return false;
+    }
+    let pool = get_pool().await;
+    let placeholders: Vec<&str> = names.iter().map(|_| "?").collect();
+    let sql = format!(
+        "SELECT 1 FROM virtual_models WHERE enabled = 1 AND name IN ({}) COLLATE NOCASE LIMIT 1",
+        placeholders.join(", ")
+    );
+    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    for n in names {
+        q = q.bind(n);
+    }
+    q.fetch_optional(pool).await.ok().flatten().unwrap_or(0) != 0
+}
+
+// ── App management ─────────────────────────────────────────────────────────
+
 pub async fn list_apps() -> Json<ApiResponse<Vec<AppConfig>>> {
     let pool = get_pool().await;
 
@@ -213,7 +235,31 @@ pub async fn launch_app(
         .unwrap_or(false);
     let proxy_base = format!("http://127.0.0.1:{}", port);
 
-    let proxy_url = format!("{}{}", proxy_base, app_type.proxy_url_suffix());
+    // Detect whether any of the configured models are virtual models.
+    // If so, the proxy_url must use the /failover/ prefix so downstream
+    // requests hit the failover route group.
+    let all_model_names: Vec<&str> = [
+        Some(body.model.as_str()),
+        body.model_haiku.as_deref(),
+        body.model_sonnet.as_deref(),
+        body.model_opus.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(body.models.iter().flat_map(|v| v.iter().map(|s| s.as_str())))
+    .collect();
+    let any_virtual = any_virtual_model(&all_model_names).await;
+
+    let suffix = if any_virtual {
+        if app_type.is_codex() || matches!(app_type, AppType::OpenCodeCli) {
+            "/failover/v1"
+        } else {
+            "/failover"
+        }
+    } else {
+        app_type.proxy_url_suffix()
+    };
+    let proxy_url = format!("{}{}", proxy_base, suffix);
     let now = chrono::Utc::now().to_rfc3339();
 
     // Write config file
@@ -222,16 +268,34 @@ pub async fn launch_app(
     let model_opus = body.model_opus.as_deref();
     let model_config_json = build_model_config(&body);
 
-    // Resolve context window from provider_models for the selected model
-    let context_window: u64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(context_window, 272000) FROM provider_models WHERE model_name = ? COLLATE NOCASE AND enabled = 1 LIMIT 1",
-    )
-    .bind(&body.model)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(272000) as u64;
+    // Resolve context window from provider_models for the selected model.
+    // For virtual models, take the MAX across all its enabled+available mappings.
+    let context_window: u64 = if any_virtual && !body.model.is_empty() {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT MAX(pm.context_window)
+             FROM virtual_model_mappings m
+             JOIN provider_models pm ON pm.id = m.provider_model_id
+             JOIN virtual_models v ON v.id = m.virtual_model_id
+             WHERE v.name = ? COLLATE NOCASE AND v.enabled = 1
+               AND m.enabled = 1 AND m.available = 1 AND pm.enabled = 1",
+        )
+        .bind(&body.model)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(272000) as u64
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(context_window, 272000) FROM provider_models WHERE model_name = ? COLLATE NOCASE AND enabled = 1 LIMIT 1",
+        )
+        .bind(&body.model)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(272000) as u64
+    };
 
     // Resolve API key: all apps use the proxy auth key for authentication against the proxy.
     // The proxy then handles format conversion and upstream provider key rotation transparently.

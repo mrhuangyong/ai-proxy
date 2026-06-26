@@ -1,5 +1,6 @@
 pub mod api;
 pub mod handlers;
+pub mod handlers_failover;
 pub mod middleware;
 pub mod retry_invisible;
 pub mod retry_session;
@@ -28,6 +29,9 @@ pub async fn start_server(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let app = create_server(host, port).await;
+
+    // Start the virtual-model health checker (no-op when no virtual models exist).
+    crate::virtual_model::health::spawn_health_checker();
 
     let addr = SocketAddr::new(
         host.parse()
@@ -66,6 +70,9 @@ pub async fn start_server_with_static(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut app = create_server(host, port).await;
+
+    // Start the virtual-model health checker (no-op when no virtual models exist).
+    crate::virtual_model::health::spawn_health_checker();
 
     if let Some(dir) = static_dir.filter(|s| !s.is_empty()) {
         let serve_dir =

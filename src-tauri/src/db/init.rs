@@ -314,6 +314,20 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 023: add upstream_user_agent to providers");
     }
 
+    // Migration 024: virtual models (failover routing layer)
+    let has_virtual_models: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='virtual_models'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_virtual_models {
+        let migration24 = include_str!("../../migrations/024_virtual_models.sql");
+        sqlx::query(migration24).execute(pool).await?;
+        info!("Applied migration 024: virtual models");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

@@ -216,7 +216,7 @@ import { useRouter } from 'vue-router'
 import { SettingsOutline } from '@vicons/ionicons5'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
-import type { AppConfig, AppType, Provider, ProviderModel } from '../types'
+import type { AppConfig, AppType, Provider, ProviderModel, VirtualModel } from '../types'
 
 const message = useMessage()
 const router = useRouter()
@@ -224,6 +224,7 @@ const loading = ref(false)
 const apps = ref<AppConfig[]>([])
 const allModels = ref<ProviderModel[]>([])
 const allProviders = ref<Provider[]>([])
+const virtualModelNames = ref<string[]>([])
 
 const showLaunchModal = ref(false)
 const launchLoading = ref(false)
@@ -302,6 +303,13 @@ const modelOptions = computed(() => {
       options.push({ label: m.model_name, value: m.model_name })
     }
   }
+  // Append virtual models with a [虚拟] tag so users can distinguish them.
+  for (const vn of virtualModelNames.value) {
+    if (!seen.has(vn)) {
+      seen.add(vn)
+      options.push({ label: `${vn} [虚拟]`, value: vn })
+    }
+  }
   return options
 })
 
@@ -328,6 +336,13 @@ async function fetchModels() {
     allModels.value = providers.flatMap((p) => p.models)
   } catch (err) {
     console.error('Failed to load models:', err)
+  }
+  // Also load virtual model names so they appear in the dropdown.
+  try {
+    const vms = await api<VirtualModel[]>('/api/virtual-models')
+    virtualModelNames.value = vms.filter((v) => v.enabled).map((v) => v.name)
+  } catch {
+    // virtual-models API may not be available; silently ignore
   }
 }
 
