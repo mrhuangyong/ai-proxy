@@ -129,6 +129,7 @@ import {
   SunnyOutline,
   MoonOutline,
   LogOutOutline,
+  SwapHorizontalOutline,
 } from '@vicons/ionicons5'
 
 const { isDark, naiveTheme, themeOverrides, toggleTheme } = useTheme()
@@ -181,10 +182,11 @@ const overviewMenu = [
 const manageMenu = computed(() => {
   const items = [
     { label: '供应商', key: '/providers', icon: renderIcon(CloudOutline) },
+    { label: '虚拟模型', key: '/virtual-models', icon: renderIcon(SwapHorizontalOutline) },
     { label: '拦截规则', key: '/rules', icon: renderIcon(SettingsOutline) },
   ]
   if (isTauri) {
-    items.splice(1, 0,
+    items.splice(2, 0,
       { label: '应用管理', key: '/apps', icon: renderIcon(AppsOutline) },
       { label: 'MCP 管理', key: '/mcp', icon: renderIcon(GitNetworkOutline) },
       { label: '技能管理', key: '/skills', icon: renderIcon(BookOutline) },

@@ -190,7 +190,7 @@ pub async fn handle_gemini(Path(model_segment): Path<String>, request: Request) 
     handle_proxy(request, ClientFormat::Gemini, Some(model), is_stream).await
 }
 
-fn parse_gemini_model_segment(segment: &str) -> (String, bool) {
+pub(crate) fn parse_gemini_model_segment(segment: &str) -> (String, bool) {
     let is_stream = segment.contains("streamGenerateContent");
     let model = segment.split(':').next().unwrap_or(segment).to_string();
     (model, is_stream)
@@ -214,7 +214,7 @@ fn truncate_str(s: &str, max_len: usize) -> std::borrow::Cow<'_, str> {
     }
 }
 
-async fn handle_proxy(
+pub(crate) async fn handle_proxy(
     request: Request,
     client_format: ClientFormat,
     override_model: Option<String>,

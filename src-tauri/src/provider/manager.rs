@@ -244,7 +244,7 @@ impl ProviderManager {
     }
 }
 
-fn parse_client_format(format: &str) -> Result<ClientFormat, crate::error::ProxyError> {
+pub fn parse_client_format(format: &str) -> Result<ClientFormat, crate::error::ProxyError> {
     match format {
         "completions" => Ok(ClientFormat::Completions),
         "responses" => Ok(ClientFormat::Responses),

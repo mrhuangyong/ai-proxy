@@ -1319,6 +1319,40 @@ pub fn api_routes() -> axum::Router {
         .route(
             "/skills-marketplace/search",
             axum::routing::get(search_skills_marketplace),
+        )
+        // Virtual models (failover routing)
+        .route(
+            "/virtual-models",
+            axum::routing::get(
+                crate::virtual_model::api::list_virtual_models,
+            )
+            .post(crate::virtual_model::api::create_virtual_model),
+        )
+        .route(
+            "/virtual-models/:id",
+            routing::put(crate::virtual_model::api::update_virtual_model)
+                .delete(crate::virtual_model::api::delete_virtual_model),
+        )
+        .route(
+            "/virtual-models/:id/sticky",
+            routing::put(crate::virtual_model::api::set_sticky),
+        )
+        .route(
+            "/virtual-models/:id/mappings",
+            axum::routing::post(crate::virtual_model::api::create_mapping),
+        )
+        .route(
+            "/virtual-models/mappings/:mid",
+            routing::put(crate::virtual_model::api::update_mapping)
+                .delete(crate::virtual_model::api::delete_mapping),
+        )
+        .route(
+            "/virtual-models/mappings/:mid/available",
+            routing::put(crate::virtual_model::api::set_mapping_available),
+        )
+        .route(
+            "/virtual-models/real-models",
+            axum::routing::get(crate::virtual_model::api::list_real_models),
         );
 
     // Desktop mode: app launcher routes

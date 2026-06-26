@@ -141,3 +141,15 @@ export type {
   UninstallSkillBody,
   InstallFromUrlBody,
 } from './skill'
+
+export type {
+  VirtualModel,
+  VirtualModelMapping,
+  RealModelOption,
+  CreateMappingInput,
+  CreateVirtualModelBody,
+  UpdateVirtualModelBody,
+  UpdateMappingBody,
+  SetAvailableBody,
+  SetStickyBody,
+} from './virtualModel'

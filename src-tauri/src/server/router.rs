@@ -1,6 +1,7 @@
 use crate::mcp;
 use crate::server::api;
 use crate::server::handlers;
+use crate::server::handlers_failover;
 use crate::server::middleware::auth_middleware;
 use crate::skill;
 use axum::middleware;
@@ -25,8 +26,42 @@ pub fn create_router() -> Router {
         )
         .layer(middleware::from_fn(auth_middleware));
 
+    // Failover group: virtual model routing with sticky-failover.
+    let failover_routes = Router::new()
+        .route(
+            "/failover/v1/chat/completions",
+            post(handlers_failover::handle_completions),
+        )
+        .route(
+            "/failover/v1/responses",
+            post(handlers_failover::handle_responses),
+        )
+        .route(
+            "/failover/v1/messages",
+            post(handlers_failover::handle_anthropic),
+        )
+        .route(
+            "/failover/v1/models",
+            get(handlers_failover::handle_list_models),
+        )
+        .route(
+            "/failover/v1/models/:model",
+            get(handlers_failover::handle_get_model),
+        )
+        .route(
+            "/failover/v1beta/models",
+            get(handlers_failover::handle_gemini_list_models),
+        )
+        .route(
+            "/failover/v1beta/models/:model",
+            get(handlers_failover::handle_gemini_get_model)
+                .post(handlers_failover::handle_gemini),
+        )
+        .layer(middleware::from_fn(auth_middleware));
+
     let router = Router::new()
         .merge(proxy_routes)
+        .merge(failover_routes)
         .route("/health", get(health_check))
         .nest("/api", api::api_routes());
 
