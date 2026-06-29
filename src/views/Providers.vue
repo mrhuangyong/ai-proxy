@@ -230,6 +230,7 @@ const modalLoading = ref(false)
 
 const showTestModal = ref(false)
 const testProviderName = ref('')
+const testProviderId = ref('')
 const testModels = ref<Array<{ model_name: string; context_window: number | null }>>([])
 const testing = ref(false)
 const testingModel = ref('')
@@ -306,6 +307,7 @@ function openEditModal(row: Provider) {
 
 function openTestModal(row: Provider) {
   testProviderName.value = row.name
+  testProviderId.value = row.id
   testModels.value = row.models.map((m) => ({ model_name: m.model_name, context_window: m.context_window ?? null }))
   testResult.value = null
   testingModel.value = ''
@@ -320,7 +322,7 @@ async function handleTestModel(modelName: string) {
   try {
     testResult.value = await api<TestResult>('/api/models/test', {
       method: 'POST',
-      body: JSON.stringify({ model_name: modelName }),
+      body: JSON.stringify({ model_name: modelName, provider_id: testProviderId.value }),
     })
   } catch (e) {
     testResult.value = {

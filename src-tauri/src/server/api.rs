@@ -860,6 +860,7 @@ async fn update_settings(
 #[derive(Deserialize)]
 struct TestModelBody {
     model_name: String,
+    provider_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -894,7 +895,12 @@ async fn test_model(
 ) -> Result<Json<ApiResponse<TestModelResult>>, Json<ApiError>> {
     let start = std::time::Instant::now();
 
-    let route = match ProviderManager::find_for_model(&body.model_name).await {
+    let route = match ProviderManager::find_for_model_on_provider(
+        &body.model_name,
+        body.provider_id.as_deref(),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             return Ok(ok(TestModelResult {

@@ -134,6 +134,7 @@ function buildChartOptions(data: Array<{ date: string; model: string; total_toke
 
   return {
     backgroundColor: 'transparent',
+    color: theme.palette,
     tooltip: { trigger: 'axis', backgroundColor: theme.bg, borderColor: theme.border, textStyle: { color: theme.text } },
     legend: { data: models, textStyle: { color: theme.text } },
     grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
@@ -152,13 +153,13 @@ function buildChartOptions(data: Array<{ date: string; model: string; total_toke
       axisLabel: { color: theme.text, fontSize: 11 },
       nameTextStyle: { color: theme.text },
     },
-    series: models.map((model, i) => ({
+    series: models.map((model, _i) => ({
       name: model,
       type: 'line',
       smooth: true,
       symbol: 'none',
-      lineStyle: { width: 2, color: theme.palette[i % theme.palette.length] },
-      areaStyle: { opacity: 0.08, color: theme.palette[i % theme.palette.length] },
+      lineStyle: { width: 2 },
+      areaStyle: { opacity: 0.08 },
       data: dates.map(date => lookup.get(`${date}|${model}`) ?? 0),
     })),
   }

@@ -51,6 +51,7 @@ struct DbResolvableCandidate {
     format: String,
     endpoint_path: Option<String>,
     upstream_user_agent: String,
+    provider_name: String,
     /// Aliased in SQL `ORDER BY` for sticky-first sorting; not read from the row.
     #[allow(dead_code)]
     sticky: i64,
@@ -76,6 +77,7 @@ impl VirtualRouter {
                 p.format,
                 p.endpoint_path,
                 p.upstream_user_agent,
+                p.name AS provider_name,
                 CASE WHEN v.current_mapping_id = m.id THEN 1 ELSE 0 END AS sticky
              FROM virtual_model_mappings m
              JOIN virtual_models v ON v.id = m.virtual_model_id
@@ -140,7 +142,7 @@ impl VirtualRouter {
         Ok(ResolvedFailover {
             route: ResolvedRoute {
                 provider_id: c.provider_id,
-                provider_name: String::new(), // not needed for forwarding
+                provider_name: c.provider_name,
                 base_url: c.base_url,
                 target_format,
                 target_model,

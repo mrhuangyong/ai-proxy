@@ -47,7 +47,7 @@ fn parse_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64
         })
 }
 
-use crate::provider::manager::ProviderManager;
+use crate::provider::manager::{ProviderManager, ResolvedRoute};
 
 pub async fn handle_completions(request: Request) -> Response {
     handle_proxy(request, ClientFormat::Completions, None, false).await
@@ -219,6 +219,16 @@ pub(crate) async fn handle_proxy(
     client_format: ClientFormat,
     override_model: Option<String>,
     force_stream: bool,
+) -> Response {
+    handle_proxy_inner(request, client_format, override_model, force_stream, None).await
+}
+
+pub(crate) async fn handle_proxy_inner(
+    request: Request,
+    client_format: ClientFormat,
+    override_model: Option<String>,
+    force_stream: bool,
+    pre_resolved: Option<ResolvedRoute>,
 ) -> Response {
     let start = std::time::Instant::now();
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -446,58 +456,76 @@ pub(crate) async fn handle_proxy(
         error!("Interceptor error: {}", e);
     }
 
-    let route = match ProviderManager::find_for_model(&ir_request.model).await {
-        Ok(r) => {
-            info!(
-                "Route found: model={} -> {} ({:?} via {})",
-                ir_request.model, r.target_model, r.target_format, r.provider_name
-            );
-            info!(
-                "[ROUTE] {} -> {} ({})",
-                ir_request.model, r.target_model, r.provider_name
-            );
-            // Non-standard Anthropic endpoints (e.g. Kimi coding) don't support thinking parameter.
-            // Clear it to avoid upstream errors and max_tokens inflation.
-            if ir_request.thinking.is_some() {
-                if r.base_url.contains("kimi.com") || r.base_url.contains("moonshot.cn") {
-                    tracing::info!(
-                        "Clearing thinking for non-standard Anthropic endpoint: {}",
-                        r.base_url
-                    );
-                    ir_request.thinking = None;
-                }
+    let route = if let Some(r) = pre_resolved {
+        info!(
+            "[ROUTE] (pre-resolved) {} -> {} ({})",
+            client_model, r.target_model, r.provider_name
+        );
+        // Non-standard Anthropic endpoints (e.g. Kimi coding) don't support thinking parameter.
+        if ir_request.thinking.is_some() {
+            if r.base_url.contains("kimi.com") || r.base_url.contains("moonshot.cn") {
+                tracing::info!(
+                    "Clearing thinking for non-standard Anthropic endpoint: {}",
+                    r.base_url
+                );
+                ir_request.thinking = None;
             }
-            r
         }
-        Err(e) => {
-            tracing::error!("[ERR] no route for model={}: {}", ir_request.model, e);
-            error!("Route not found for model '{}': {}", ir_request.model, e);
-            if let Err(le) = log_request_entry(
-                &request_id,
-                &client_format,
-                "proxy",
-                &client_format,
-                &client_model,
-                "",
-                ir_request.stream,
-                404,
-                start.elapsed().as_millis() as i64,
-                Some(&format!("route not found: {}", e)),
-                0,
-                0,
-                0,
-                None,
-                None,
-                None,
-                0,
-                None,
-                client_user_agent.as_deref(),
-            )
-            .await
-            {
-                tracing::error!("Early error logging failed: {}", le);
+        r
+    } else {
+        match ProviderManager::find_for_model(&ir_request.model).await {
+            Ok(r) => {
+                info!(
+                    "Route found: model={} -> {} ({:?} via {})",
+                    ir_request.model, r.target_model, r.target_format, r.provider_name
+                );
+                info!(
+                    "[ROUTE] {} -> {} ({})",
+                    ir_request.model, r.target_model, r.provider_name
+                );
+                // Non-standard Anthropic endpoints (e.g. Kimi coding) don't support thinking parameter.
+                // Clear it to avoid upstream errors and max_tokens inflation.
+                if ir_request.thinking.is_some() {
+                    if r.base_url.contains("kimi.com") || r.base_url.contains("moonshot.cn") {
+                        tracing::info!(
+                            "Clearing thinking for non-standard Anthropic endpoint: {}",
+                            r.base_url
+                        );
+                        ir_request.thinking = None;
+                    }
+                }
+                r
             }
-            return e.into_response();
+            Err(e) => {
+                tracing::error!("[ERR] no route for model={}: {}", ir_request.model, e);
+                error!("Route not found for model '{}': {}", ir_request.model, e);
+                if let Err(le) = log_request_entry(
+                    &request_id,
+                    &client_format,
+                    "proxy",
+                    &client_format,
+                    &client_model,
+                    "",
+                    ir_request.stream,
+                    404,
+                    start.elapsed().as_millis() as i64,
+                    Some(&format!("route not found: {}", e)),
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    0,
+                    None,
+                    client_user_agent.as_deref(),
+                )
+                .await
+                {
+                    tracing::error!("Early error logging failed: {}", le);
+                }
+                return e.into_response();
+            }
         }
     };
 

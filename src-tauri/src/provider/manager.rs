@@ -106,19 +106,49 @@ impl ProviderManager {
     }
 
     pub async fn find_for_model(model: &str) -> Result<ResolvedRoute, crate::error::ProxyError> {
+        Self::find_for_model_on_provider(model, None).await
+    }
+
+    /// Resolve a model name into a concrete upstream route, optionally
+    /// constrained to a specific `provider_id`. When `provider_id` is `None`
+    /// the behaviour matches `find_for_model` (picks any enabled provider
+    /// that has the model). When provided, the search is restricted to that
+    /// provider's `provider_models` rows — this is essential for the test-model
+    /// flow where the user explicitly picked a provider to test against.
+    pub async fn find_for_model_on_provider(
+        model: &str,
+        provider_id: Option<&str>,
+    ) -> Result<ResolvedRoute, crate::error::ProxyError> {
         let pool = get_pool().await;
         info!("Looking up route for model: {}", model);
 
-        let matched: DbProviderModel = sqlx::query_as(
-            "SELECT pm.id, pm.provider_id, pm.model_name, pm.target_model, pm.context_window, pm.enabled, pm.created_at
-             FROM provider_models pm
-             JOIN providers p ON p.id = pm.provider_id
-             WHERE pm.model_name = ? COLLATE NOCASE AND pm.enabled = 1 AND p.enabled = 1
-             LIMIT 1",
-        )
-        .bind(model)
-        .fetch_one(pool)
-        .await
+        let matched: DbProviderModel = match provider_id {
+            Some(pid) => {
+                sqlx::query_as(
+                    "SELECT pm.id, pm.provider_id, pm.model_name, pm.target_model, pm.context_window, pm.enabled, pm.created_at
+                     FROM provider_models pm
+                     JOIN providers p ON p.id = pm.provider_id
+                     WHERE pm.model_name = ? COLLATE NOCASE AND pm.enabled = 1 AND p.enabled = 1 AND pm.provider_id = ?
+                     LIMIT 1",
+                )
+                .bind(model)
+                .bind(pid)
+                .fetch_one(pool)
+                .await
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT pm.id, pm.provider_id, pm.model_name, pm.target_model, pm.context_window, pm.enabled, pm.created_at
+                     FROM provider_models pm
+                     JOIN providers p ON p.id = pm.provider_id
+                     WHERE pm.model_name = ? COLLATE NOCASE AND pm.enabled = 1 AND p.enabled = 1
+                     LIMIT 1",
+                )
+                .bind(model)
+                .fetch_one(pool)
+                .await
+            }
+        }
         .map_err(|_| crate::error::ProxyError::Routing(
             format!("no provider found for model '{}'", model)
         ))?;

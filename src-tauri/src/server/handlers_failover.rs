@@ -18,7 +18,6 @@ use crate::db::get_pool;
 use crate::error::ProxyError;
 use crate::server::handlers;
 use crate::virtual_model::manager::VirtualRouter;
-use crate::virtual_model::ResolvedFailover;
 
 pub async fn handle_completions(request: Request) -> Response {
     run_failover(request, ClientFormat::Completions, None, false).await
@@ -213,10 +212,17 @@ async fn run_failover(
             });
         }
 
-        let request_body_bytes = build_request_body(&body_bytes, &resolved, &client_format);
+        // Pass the ORIGINAL body (with virtual model name) unchanged.
+        // handle_proxy_inner will:
+        //   1. parse ir_request.model = virtual_model_name
+        //   2. capture client_model = virtual_model_name (for logging)
+        //   3. use our pre_resolved route (correct provider + target_model)
+        //   4. override ir_request.model = route.target_model (real model for upstream)
+        // This ensures request logs show the virtual model name as `model`
+        // and the real model as `target_model`, and the actual provider
+        // matches the failover mapping — so failure counts are accurate.
+        let request_body_bytes = body_bytes.to_vec();
 
-        // Construct a fresh `http::Request<axum::body::Body>` (= axum's Request)
-        // to feed into the standard handle_proxy.
         let mut req_builder = axum::http::Request::builder()
             .method(parts.method.clone())
             .uri(parts.uri.clone());
@@ -232,11 +238,12 @@ async fn run_failover(
                     .unwrap()
             });
 
-        let response = handlers::handle_proxy(
+        let response = handlers::handle_proxy_inner(
             new_request,
             client_format.clone(),
-            override_for_inner(&client_format, &resolved),
+            override_model.clone(),
             force_stream,
+            Some(resolved.route.clone()),
         )
         .await;
 
@@ -267,36 +274,6 @@ async fn run_failover(
         excluded.push(resolved.mapping_id.clone());
         last_response = Some(response);
         attempts += 1;
-    }
-}
-
-/// Rewrite the incoming body's `model` field so it carries the real upstream
-/// target model. Gemini has no JSON `model` key — the real model is passed via
-/// the `override_model` param to `handle_proxy`.
-fn build_request_body(
-    original: &[u8],
-    resolved: &ResolvedFailover,
-    client_format: &ClientFormat,
-) -> Vec<u8> {
-    if matches!(client_format, ClientFormat::Gemini) {
-        return original.to_vec();
-    }
-    let mut v: Value = match serde_json::from_slice(original) {
-        Ok(v) => v,
-        Err(_) => return original.to_vec(),
-    };
-    v["model"] = Value::String(resolved.route.target_model.clone());
-    serde_json::to_vec(&v).unwrap_or_else(|_| original.to_vec())
-}
-
-fn override_for_inner(
-    client_format: &ClientFormat,
-    resolved: &ResolvedFailover,
-) -> Option<String> {
-    if matches!(client_format, ClientFormat::Gemini) {
-        Some(resolved.route.target_model.clone())
-    } else {
-        None
     }
 }
 
