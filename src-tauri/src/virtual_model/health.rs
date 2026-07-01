@@ -77,11 +77,7 @@ async fn load_probe_max_tokens() -> u32 {
 /// key path as the live proxy so the probe exercises real auth + endpoint.
 /// Returns Ok(()) if the upstream returned any HTTP response with status
 /// <= 500; returns Err on transport failure or 5xx status.
-async fn probe(
-    provider_id: &str,
-    model_name: &str,
-    max_tokens: u32,
-) -> Result<(), String> {
+async fn probe(provider_id: &str, model_name: &str, max_tokens: u32) -> Result<(), String> {
     use serde_json::json;
 
     let selected_key = KeyRotation::get_next_key(provider_id, &RotationStrategy::LeastUsed)
@@ -115,11 +111,7 @@ async fn probe(
     });
 
     let client = crate::http::SHARED_HTTP_CLIENT.clone();
-    let url = format!(
-        "{}/{}",
-        base_url.trim_end_matches('/'),
-        probe_path(&format)
-    );
+    let url = format!("{}/{}", base_url.trim_end_matches('/'), probe_path(&format));
     let mut req = client
         .post(&url)
         .json(&body)

@@ -98,7 +98,8 @@ pub struct RealModelOption {
 
 // --- Handlers ---
 
-pub async fn list_virtual_models() -> Result<Json<ApiResponse<Vec<VirtualModelWithMappings>>>, Json<ApiError>> {
+pub async fn list_virtual_models(
+) -> Result<Json<ApiResponse<Vec<VirtualModelWithMappings>>>, Json<ApiError>> {
     match fetch_virtual_models_with_mappings().await {
         Ok(items) => Ok(ok(items)),
         Err(e) => Err(err_json(e.to_string())),
@@ -128,7 +129,13 @@ pub async fn create_virtual_model(
 
     // Attach initial mappings (best-effort: skip invalid provider_model_id).
     for m in body.mappings {
-        let _ = attach_mapping(&id, &m.provider_model_id, m.priority.unwrap_or(100), m.enabled.unwrap_or(true)).await;
+        let _ = attach_mapping(
+            &id,
+            &m.provider_model_id,
+            m.priority.unwrap_or(100),
+            m.enabled.unwrap_or(true),
+        )
+        .await;
     }
 
     Ok(ok(id))
@@ -143,19 +150,34 @@ pub async fn update_virtual_model(
     if let Some(name) = body.name {
         sets.push("name = ?".to_string());
         // bind later; for simplicity execute per-field
-        let _ = sqlx::query("UPDATE virtual_models SET name = ?, updated_at = datetime('now') WHERE id = ?")
-            .bind(name).bind(&id).execute(pool).await;
+        let _ = sqlx::query(
+            "UPDATE virtual_models SET name = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(name)
+        .bind(&id)
+        .execute(pool)
+        .await;
     }
     let _ = sets;
     let pool = get_pool().await;
     if let Some(desc) = body.description {
-        let _ = sqlx::query("UPDATE virtual_models SET description = ?, updated_at = datetime('now') WHERE id = ?")
-            .bind(desc).bind(&id).execute(pool).await;
+        let _ = sqlx::query(
+            "UPDATE virtual_models SET description = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(desc)
+        .bind(&id)
+        .execute(pool)
+        .await;
     }
     let pool = get_pool().await;
     if let Some(enabled) = body.enabled {
-        let _ = sqlx::query("UPDATE virtual_models SET enabled = ?, updated_at = datetime('now') WHERE id = ?")
-            .bind(if enabled { 1 } else { 0 }).bind(&id).execute(pool).await;
+        let _ = sqlx::query(
+            "UPDATE virtual_models SET enabled = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(if enabled { 1 } else { 0 })
+        .bind(&id)
+        .execute(pool)
+        .await;
     }
     Ok(ok(()))
 }
@@ -176,7 +198,14 @@ pub async fn create_mapping(
     axum::extract::Path(virtual_id): axum::extract::Path<String>,
     axum::Json(body): axum::Json<CreateMappingInput>,
 ) -> Result<Json<ApiResponse<String>>, Json<ApiError>> {
-    match attach_mapping(&virtual_id, &body.provider_model_id, body.priority.unwrap_or(100), body.enabled.unwrap_or(true)).await {
+    match attach_mapping(
+        &virtual_id,
+        &body.provider_model_id,
+        body.priority.unwrap_or(100),
+        body.enabled.unwrap_or(true),
+    )
+    .await
+    {
         Ok(mid) => Ok(ok(mid)),
         Err(e) => Err(err_json(e.to_string())),
     }
@@ -189,12 +218,18 @@ pub async fn update_mapping(
     let pool = get_pool().await;
     if let Some(p) = body.priority {
         let _ = sqlx::query("UPDATE virtual_model_mappings SET priority = ? WHERE id = ?")
-            .bind(p).bind(&mid).execute(pool).await;
+            .bind(p)
+            .bind(&mid)
+            .execute(pool)
+            .await;
     }
     let pool = get_pool().await;
     if let Some(enabled) = body.enabled {
         let _ = sqlx::query("UPDATE virtual_model_mappings SET enabled = ? WHERE id = ?")
-            .bind(if enabled { 1 } else { 0 }).bind(&mid).execute(pool).await;
+            .bind(if enabled { 1 } else { 0 })
+            .bind(&mid)
+            .execute(pool)
+            .await;
     }
     Ok(ok(()))
 }
@@ -214,8 +249,12 @@ pub async fn delete_mapping(
 ) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
     let pool = get_pool().await;
     // Clear sticky anchor if it points here.
-    let _ = sqlx::query("UPDATE virtual_models SET current_mapping_id = NULL WHERE current_mapping_id = ?")
-        .bind(&mid).execute(pool).await;
+    let _ = sqlx::query(
+        "UPDATE virtual_models SET current_mapping_id = NULL WHERE current_mapping_id = ?",
+    )
+    .bind(&mid)
+    .execute(pool)
+    .await;
     let pool = get_pool().await;
     sqlx::query("DELETE FROM virtual_model_mappings WHERE id = ?")
         .bind(&mid)
@@ -261,9 +300,8 @@ pub async fn set_sticky(
             .fetch_optional(pool)
             .await
             .map_err(|e| err_json(format!("db: {}", e)))?;
-            let (_, enabled, available) = row.ok_or_else(|| {
-                err_json("mapping does not belong to this virtual model")
-            })?;
+            let (_, enabled, available) =
+                row.ok_or_else(|| err_json("mapping does not belong to this virtual model"))?;
             if enabled == 0 {
                 return Err(err_json("cannot stick to a disabled mapping"));
             }
@@ -311,8 +349,7 @@ pub async fn list_real_models() -> Result<Json<ApiResponse<Vec<RealModelOption>>
 
 // --- helpers ---
 
-async fn fetch_virtual_models_with_mappings(
-) -> Result<Vec<VirtualModelWithMappings>, ProxyError> {
+async fn fetch_virtual_models_with_mappings() -> Result<Vec<VirtualModelWithMappings>, ProxyError> {
     let pool = get_pool().await;
     let vrows: Vec<VirtualModelRow> = sqlx::query_as(
         "SELECT id, name, description, current_mapping_id, enabled FROM virtual_models ORDER BY name",

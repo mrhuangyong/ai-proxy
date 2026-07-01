@@ -622,6 +622,7 @@ fn convert_anthropic_content(parts: &[IrContentPart], role: &IrRole) -> Value {
                     "source": source,
                 })
             }
+            IrContentPart::Compaction { .. } => serde_json::Value::Null,
             IrContentPart::ToolUse { id, name, input } => json!({
                 "type": "tool_use",
                 "id": id,
@@ -646,6 +647,7 @@ fn convert_anthropic_content(parts: &[IrContentPart], role: &IrRole) -> Value {
                 block
             }
         })
+        .filter(|v| !v.is_null())
         .collect();
 
     json!(items)

@@ -156,9 +156,9 @@ fn case_a_plain_text_lifecycle_is_complete_and_ordered() {
 
     // item_id must be present on all message delta/done/part events so codex
     // can associate them with the active message item.
-    assert_eq!(frames[2]["item_id"].as_str(), Some("msg_proxy")); // content_part.added
-    assert_eq!(frames[3]["item_id"].as_str(), Some("msg_proxy")); // output_text.delta
-    assert_eq!(frames[5]["item_id"].as_str(), Some("msg_proxy")); // output_text.done
+    assert_eq!(frames[2]["item_id"].as_str(), Some("msg_resp_test")); // content_part.added
+    assert_eq!(frames[3]["item_id"].as_str(), Some("msg_resp_test")); // output_text.delta
+    assert_eq!(frames[5]["item_id"].as_str(), Some("msg_resp_test")); // output_text.done
 
     assert_strict_sequence(&frames);
 }
@@ -203,15 +203,15 @@ fn case_b_reasoning_then_text_keeps_indices_disjoint() {
 
     // reasoning item added/done envelope is type=reasoning
     assert_eq!(frames[1]["item"]["type"].as_str(), Some("reasoning"));
-    assert_eq!(frames[1]["item"]["id"].as_str(), Some("rs_proxy"));
+    assert_eq!(frames[1]["item"]["id"].as_str(), Some("rs_resp_test"));
     assert_eq!(frames[5]["item"]["type"].as_str(), Some("reasoning"));
 
     // reasoning summary events carry item_id so codex can bind them
-    assert_eq!(frames[2]["item_id"].as_str(), Some("rs_proxy"));
+    assert_eq!(frames[2]["item_id"].as_str(), Some("rs_resp_test"));
     assert_eq!(frames[3]["delta"].as_str(), Some("analyzing..."));
-    assert_eq!(frames[3]["item_id"].as_str(), Some("rs_proxy"));
+    assert_eq!(frames[3]["item_id"].as_str(), Some("rs_resp_test"));
     assert_eq!(frames[4]["part"]["text"].as_str(), Some("analyzing..."));
-    assert_eq!(frames[4]["item_id"].as_str(), Some("rs_proxy"));
+    assert_eq!(frames[4]["item_id"].as_str(), Some("rs_resp_test"));
 
     // reasoning item done carries full summary
     assert_eq!(
@@ -219,12 +219,12 @@ fn case_b_reasoning_then_text_keeps_indices_disjoint() {
         Some("analyzing...")
     );
 
-    // text part still correct + carries msg_proxy item_id
+    // text part still correct + carries unique message item_id
     assert_eq!(frames[6]["item"]["type"].as_str(), Some("message"));
     assert_eq!(frames[8]["delta"].as_str(), Some("answer"));
-    assert_eq!(frames[8]["item_id"].as_str(), Some("msg_proxy"));
+    assert_eq!(frames[8]["item_id"].as_str(), Some("msg_resp_test"));
     assert_eq!(frames[9]["text"].as_str(), Some("answer"));
-    assert_eq!(frames[9]["item_id"].as_str(), Some("msg_proxy"));
+    assert_eq!(frames[9]["item_id"].as_str(), Some("msg_resp_test"));
 
     // reasoning output_index (0..5) disjoint from message output_index (6..10)
     assert_eq!(frames[1]["output_index"].as_i64(), Some(0));
@@ -317,4 +317,28 @@ fn case_c_function_call_lifecycle() {
     assert_eq!(frames[4]["arguments"].as_str(), Some("{\"x\":1}"));
 
     assert_strict_sequence(&frames);
+}
+
+#[test]
+fn case_d_different_responses_get_distinct_item_ids() {
+    // Regression: every response must derive a unique item_id from its
+    // response_id. A fixed id like "msg_proxy" caused Codex to bind later
+    // responses' text deltas to the same streaming item as earlier ones,
+    // so later messages overwrote earlier ones in the UI.
+    let sm1 = ResponsesStreamStateMachine::new("resp_alpha".into(), "m".into());
+    let frames1 = run(sm1, &[delta_content("first"), finish_completed()]);
+
+    let sm2 = ResponsesStreamStateMachine::new("resp_beta".into(), "m".into());
+    let frames2 = run(sm2, &[delta_content("second"), finish_completed()]);
+
+    // Extract the message item_id from the content_part.added event (frame[2])
+    let id1 = frames1[2]["item_id"].as_str().unwrap();
+    let id2 = frames2[2]["item_id"].as_str().unwrap();
+
+    assert!(
+        id1 != id2,
+        "item_id must differ across responses, got {id1} == {id2}"
+    );
+    assert_eq!(id1, "msg_resp_alpha");
+    assert_eq!(id2, "msg_resp_beta");
 }

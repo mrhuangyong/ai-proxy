@@ -12,6 +12,10 @@ pub fn create_router() -> Router {
     let proxy_routes = Router::new()
         .route("/v1/chat/completions", post(handlers::handle_completions))
         .route("/v1/responses", post(handlers::handle_responses))
+        .route(
+            "/v1/responses/compact",
+            post(handlers::handle_responses_compact),
+        )
         .route("/v1/messages", post(handlers::handle_anthropic))
         .route(
             "/v1/messages/count_tokens",
@@ -37,6 +41,10 @@ pub fn create_router() -> Router {
             post(handlers_failover::handle_responses),
         )
         .route(
+            "/failover/v1/responses/compact",
+            post(handlers_failover::handle_responses_compact),
+        )
+        .route(
             "/failover/v1/messages",
             post(handlers_failover::handle_anthropic),
         )
@@ -54,8 +62,7 @@ pub fn create_router() -> Router {
         )
         .route(
             "/failover/v1beta/models/:model",
-            get(handlers_failover::handle_gemini_get_model)
-                .post(handlers_failover::handle_gemini),
+            get(handlers_failover::handle_gemini_get_model).post(handlers_failover::handle_gemini),
         )
         .layer(middleware::from_fn(auth_middleware));
 

@@ -362,6 +362,19 @@ impl FormatParser for ResponsesParser {
                             arguments: arguments.to_string(),
                         });
                     }
+                    "compaction" => {
+                        let id = output["id"].as_str().unwrap_or("").to_string();
+                        let encrypted = output["encrypted_content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        if !encrypted.is_empty() {
+                            content_parts.push(IrContentPart::Compaction {
+                                id,
+                                encrypted_content: encrypted,
+                            });
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -564,6 +577,24 @@ fn parse_input_item(item: &Value) -> Result<Option<IrMessage>, ProxyError> {
                     vec![IrContentPart::Thinking {
                         text,
                         signature: None,
+                    }]
+                },
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }))
+        }
+        "compaction" => {
+            let id = item["id"].as_str().unwrap_or("").to_string();
+            let encrypted = item["encrypted_content"].as_str().unwrap_or("").to_string();
+            Ok(Some(IrMessage {
+                role: IrRole::Assistant,
+                content: if encrypted.is_empty() {
+                    vec![]
+                } else {
+                    vec![IrContentPart::Compaction {
+                        id,
+                        encrypted_content: encrypted,
                     }]
                 },
                 name: None,

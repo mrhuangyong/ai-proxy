@@ -20,20 +20,38 @@ use crate::server::handlers;
 use crate::virtual_model::manager::VirtualRouter;
 
 pub async fn handle_completions(request: Request) -> Response {
-    run_failover(request, ClientFormat::Completions, None, false).await
+    run_failover(request, ClientFormat::Completions, None, false, None).await
 }
 
 pub async fn handle_responses(request: Request) -> Response {
-    run_failover(request, ClientFormat::Responses, None, false).await
+    run_failover(request, ClientFormat::Responses, None, false, None).await
+}
+
+pub async fn handle_responses_compact(request: Request) -> Response {
+    run_failover(
+        request,
+        ClientFormat::Responses,
+        None,
+        false,
+        Some("/v1/responses/compact"),
+    )
+    .await
 }
 
 pub async fn handle_anthropic(request: Request) -> Response {
-    run_failover(request, ClientFormat::Anthropic, None, false).await
+    run_failover(request, ClientFormat::Anthropic, None, false, None).await
 }
 
 pub async fn handle_gemini(Path(model_segment): Path<String>, request: Request) -> Response {
     let (virtual_name, is_stream) = handlers::parse_gemini_model_segment(&model_segment);
-    run_failover(request, ClientFormat::Gemini, Some(virtual_name), is_stream).await
+    run_failover(
+        request,
+        ClientFormat::Gemini,
+        Some(virtual_name),
+        is_stream,
+        None,
+    )
+    .await
 }
 
 /// `GET /failover/v1/models` — OpenAI-style list of virtual models.
@@ -102,7 +120,8 @@ pub async fn handle_gemini_get_model(Path(model): Path<String>) -> Response {
         }))
         .into_response()
     } else {
-        ProxyError::ModelNotFound(format!("virtual model '{}' not found", model_name)).into_response()
+        ProxyError::ModelNotFound(format!("virtual model '{}' not found", model_name))
+            .into_response()
     }
 }
 
@@ -135,6 +154,7 @@ async fn run_failover(
     client_format: ClientFormat,
     override_model: Option<String>,
     force_stream: bool,
+    endpoint_override: Option<&str>,
 ) -> Response {
     let start = std::time::Instant::now();
     let (parts, body) = request.into_parts();
@@ -142,7 +162,8 @@ async fn run_failover(
     let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
-            return ProxyError::Parse(format!("failed to read failover body: {}", e)).into_response();
+            return ProxyError::Parse(format!("failed to read failover body: {}", e))
+                .into_response();
         }
     };
 
@@ -244,6 +265,7 @@ async fn run_failover(
             override_model.clone(),
             force_stream,
             Some(resolved.route.clone()),
+            endpoint_override,
         )
         .await;
 

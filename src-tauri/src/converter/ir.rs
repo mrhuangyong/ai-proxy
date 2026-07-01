@@ -107,6 +107,12 @@ pub enum IrContentPart {
         tool_name: Option<String>,
         id: Option<String>,
     },
+    /// Opaque compaction item from the Responses API compact endpoint.
+    /// Carries encrypted_content that must be passed through verbatim.
+    Compaction {
+        id: String,
+        encrypted_content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

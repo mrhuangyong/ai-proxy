@@ -24,6 +24,20 @@ impl FormatGenerator for ResponsesGenerator {
                     }));
                 }
                 IrRole::Assistant => {
+                    // Extract compaction items first (opaque encrypted_content passthrough).
+                    for part in &msg.content {
+                        if let IrContentPart::Compaction {
+                            id,
+                            encrypted_content,
+                        } = part
+                        {
+                            input_items.push(json!({
+                                "type": "compaction",
+                                "id": id,
+                                "encrypted_content": encrypted_content,
+                            }));
+                        }
+                    }
                     let mut item = json!({
                         "role": "assistant",
                     });
@@ -328,6 +342,20 @@ impl FormatGenerator for ResponsesGenerator {
             }
         }
 
+        for part in &ir.message.content {
+            if let IrContentPart::Compaction {
+                id,
+                encrypted_content,
+            } = part
+            {
+                output.push(json!({
+                    "type": "compaction",
+                    "id": id,
+                    "encrypted_content": encrypted_content,
+                }));
+            }
+        }
+
         Ok(json!({
             "id": id,
             "object": "response",
@@ -420,6 +448,14 @@ fn convert_message_content(parts: &[IrContentPart]) -> Value {
                 "type": "function_call_output",
                 "call_id": tool_use_id,
                 "output": content,
+            }),
+            IrContentPart::Compaction {
+                id,
+                encrypted_content,
+            } => json!({
+                "type": "compaction",
+                "id": id,
+                "encrypted_content": encrypted_content,
             }),
         })
         .collect();

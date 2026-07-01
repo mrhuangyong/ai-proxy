@@ -246,7 +246,11 @@ pub async fn launch_app(
     ]
     .into_iter()
     .flatten()
-    .chain(body.models.iter().flat_map(|v| v.iter().map(|s| s.as_str())))
+    .chain(
+        body.models
+            .iter()
+            .flat_map(|v| v.iter().map(|s| s.as_str())),
+    )
     .collect();
     let any_virtual = any_virtual_model(&all_model_names).await;
 

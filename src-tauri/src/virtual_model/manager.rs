@@ -97,15 +97,12 @@ impl VirtualRouter {
         .await
         .map_err(|e| ProxyError::Database(e))?;
 
-        let c = candidates
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                ProxyError::Routing(format!(
-                    "no available mapping for virtual model '{}'",
-                    virtual_name
-                ))
-            })?;
+        let c = candidates.into_iter().next().ok_or_else(|| {
+            ProxyError::Routing(format!(
+                "no available mapping for virtual model '{}'",
+                virtual_name
+            ))
+        })?;
 
         // Persist the sticky anchor so subsequent requests stay on the same mapping.
         sqlx::query(
@@ -199,7 +196,11 @@ impl VirtualRouter {
         // Mapping becomes unavailable the moment the threshold is crossed.
         let was_available = cur_avail == 1;
         let new_avail: i64 = if crosses { 0 } else { cur_avail };
-        let new_failover: i64 = if crosses && was_available { cur_failover + 1 } else { cur_failover };
+        let new_failover: i64 = if crosses && was_available {
+            cur_failover + 1
+        } else {
+            cur_failover
+        };
 
         let pool = get_pool().await;
         let _ = sqlx::query(

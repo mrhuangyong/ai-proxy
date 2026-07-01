@@ -1329,10 +1329,8 @@ pub fn api_routes() -> axum::Router {
         // Virtual models (failover routing)
         .route(
             "/virtual-models",
-            axum::routing::get(
-                crate::virtual_model::api::list_virtual_models,
-            )
-            .post(crate::virtual_model::api::create_virtual_model),
+            axum::routing::get(crate::virtual_model::api::list_virtual_models)
+                .post(crate::virtual_model::api::create_virtual_model),
         )
         .route(
             "/virtual-models/:id",

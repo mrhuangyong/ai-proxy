@@ -50,15 +50,29 @@ fn parse_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64
 use crate::provider::manager::{ProviderManager, ResolvedRoute};
 
 pub async fn handle_completions(request: Request) -> Response {
-    handle_proxy(request, ClientFormat::Completions, None, false).await
+    handle_proxy(request, ClientFormat::Completions, None, false, None).await
 }
 
 pub async fn handle_responses(request: Request) -> Response {
-    handle_proxy(request, ClientFormat::Responses, None, false).await
+    handle_proxy(request, ClientFormat::Responses, None, false, None).await
+}
+
+/// POST /v1/responses/compact — OpenAI conversation compaction endpoint.
+/// Forwards to upstream's /v1/responses/compact with the same routing,
+/// key rotation, and logging as a normal responses request.
+pub async fn handle_responses_compact(request: Request) -> Response {
+    handle_proxy(
+        request,
+        ClientFormat::Responses,
+        None,
+        false,
+        Some("/v1/responses/compact"),
+    )
+    .await
 }
 
 pub async fn handle_anthropic(request: Request) -> Response {
-    handle_proxy(request, ClientFormat::Anthropic, None, false).await
+    handle_proxy(request, ClientFormat::Anthropic, None, false, None).await
 }
 
 pub async fn handle_anthropic_count_tokens(request: Request) -> Response {
@@ -187,7 +201,7 @@ pub async fn handle_anthropic_count_tokens(request: Request) -> Response {
 
 pub async fn handle_gemini(Path(model_segment): Path<String>, request: Request) -> Response {
     let (model, is_stream) = parse_gemini_model_segment(&model_segment);
-    handle_proxy(request, ClientFormat::Gemini, Some(model), is_stream).await
+    handle_proxy(request, ClientFormat::Gemini, Some(model), is_stream, None).await
 }
 
 pub(crate) fn parse_gemini_model_segment(segment: &str) -> (String, bool) {
@@ -219,8 +233,17 @@ pub(crate) async fn handle_proxy(
     client_format: ClientFormat,
     override_model: Option<String>,
     force_stream: bool,
+    endpoint_override: Option<&str>,
 ) -> Response {
-    handle_proxy_inner(request, client_format, override_model, force_stream, None).await
+    handle_proxy_inner(
+        request,
+        client_format,
+        override_model,
+        force_stream,
+        None,
+        endpoint_override,
+    )
+    .await
 }
 
 pub(crate) async fn handle_proxy_inner(
@@ -229,6 +252,7 @@ pub(crate) async fn handle_proxy_inner(
     override_model: Option<String>,
     force_stream: bool,
     pre_resolved: Option<ResolvedRoute>,
+    endpoint_override: Option<&str>,
 ) -> Response {
     let start = std::time::Instant::now();
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -456,7 +480,7 @@ pub(crate) async fn handle_proxy_inner(
         error!("Interceptor error: {}", e);
     }
 
-    let route = if let Some(r) = pre_resolved {
+    let mut route = if let Some(r) = pre_resolved {
         info!(
             "[ROUTE] (pre-resolved) {} -> {} ({})",
             client_model, r.target_model, r.provider_name
@@ -528,6 +552,11 @@ pub(crate) async fn handle_proxy_inner(
             }
         }
     };
+
+    // Override endpoint path (e.g. /v1/responses/compact for the compact endpoint).
+    if let Some(ep) = endpoint_override {
+        route.endpoint_path = ep.to_string();
+    }
 
     let selected_key =
         match KeyRotation::get_next_key(&route.provider_id, &RotationStrategy::LeastUsed).await {
@@ -2221,6 +2250,11 @@ impl Drop for StreamLoggingGuard {
 pub struct ResponsesStreamStateMachine {
     response_id: String,
     model: String,
+    /// Unique message item id derived from response_id, so multiple responses
+    /// in the same turn never collide on a fixed id like "msg_proxy".
+    message_id: String,
+    /// Unique reasoning item id derived from response_id.
+    reasoning_id: String,
     seq: u64,
     started: bool,
     finished: bool,
@@ -2242,9 +2276,13 @@ pub struct ResponsesStreamStateMachine {
 
 impl ResponsesStreamStateMachine {
     pub fn new(response_id: String, model: String) -> Self {
+        let message_id = format!("msg_{}", &response_id);
+        let reasoning_id = format!("rs_{}", &response_id);
         Self {
             response_id,
             model,
+            message_id,
+            reasoning_id,
             seq: 0,
             started: false,
             finished: false,
@@ -2323,7 +2361,7 @@ impl ResponsesStreamStateMachine {
             "type": "response.reasoning_summary_part.done",
             "output_index": idx,
             "content_index": 0,
-            "item_id": "rs_proxy",
+            "item_id": self.reasoning_id,
             "part": {
                 "type": "summary_text",
                 "text": self.accumulated_reasoning.clone(),
@@ -2337,7 +2375,7 @@ impl ResponsesStreamStateMachine {
                 "output_index": idx,
                 "item": {
                     "type": "reasoning",
-                    "id": "rs_proxy",
+                    "id": self.reasoning_id,
                     "summary": [{"type": "summary_text", "text": self.accumulated_reasoning.clone()}],
                     "status": "completed",
                 }
@@ -2377,7 +2415,7 @@ impl ResponsesStreamStateMachine {
                             "type": "response.output_text.done",
                             "output_index": self.output_index - 1,
                             "content_index": 0,
-                            "item_id": "msg_proxy",
+                            "item_id": self.message_id,
                             "text": self.accumulated_text,
                         })));
                         self.text_part_open = false;
@@ -2388,7 +2426,7 @@ impl ResponsesStreamStateMachine {
                             "output_index": self.output_index - 1,
                             "item": {
                                 "type": "message",
-                                "id": "msg_proxy",
+                                "id": self.message_id,
                                 "role": "assistant",
                                 "content": [{"type": "output_text", "text": self.accumulated_text}],
                                 "status": "completed",
@@ -2470,7 +2508,7 @@ impl ResponsesStreamStateMachine {
                             "output_index": self.output_index,
                             "item": {
                                 "type": "reasoning",
-                                "id": "rs_proxy",
+                                "id": self.reasoning_id,
                                 "summary": [],
                                 "status": "in_progress",
                             }
@@ -2481,7 +2519,7 @@ impl ResponsesStreamStateMachine {
                         "type": "response.reasoning_summary_part.added",
                         "output_index": self.output_index,
                         "content_index": 0,
-                        "item_id": "rs_proxy",
+                        "item_id": self.reasoning_id,
                         "part": {"type": "summary_text", "text": ""},
                         "response_id": self.response_id,
                     })));
@@ -2492,7 +2530,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.reasoning_summary_text.delta",
                     "output_index": self.output_index,
                     "content_index": 0,
-                    "item_id": "rs_proxy",
+                    "item_id": self.reasoning_id,
                     "delta": thinking,
                     "response_id": self.response_id,
                 })));
@@ -2516,7 +2554,7 @@ impl ResponsesStreamStateMachine {
                         "output_index": self.output_index,
                         "item": {
                             "type": "message",
-                            "id": "msg_proxy",
+                            "id": self.message_id,
                             "role": "assistant",
                             "content": [],
                             "status": "in_progress",
@@ -2526,7 +2564,7 @@ impl ResponsesStreamStateMachine {
                         "type": "response.content_part.added",
                         "output_index": self.output_index,
                         "content_index": 0,
-                        "item_id": "msg_proxy",
+                        "item_id": self.message_id,
                         "part": {"type": "output_text", "text": ""},
                     })));
                     self.message_open = true;
@@ -2538,7 +2576,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.output_text.delta",
                     "output_index": self.output_index - 1,
                     "content_index": 0,
-                    "item_id": "msg_proxy",
+                    "item_id": self.message_id,
                     "delta": content,
                     "response_id": self.response_id,
                 })));
@@ -2553,7 +2591,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.output_text.done",
                     "output_index": self.output_index - 1,
                     "content_index": 0,
-                    "item_id": "msg_proxy",
+                    "item_id": self.message_id,
                     "text": self.accumulated_text,
                 })));
                 self.text_part_open = false;
@@ -2564,7 +2602,7 @@ impl ResponsesStreamStateMachine {
                     "output_index": self.output_index - 1,
                     "item": {
                         "type": "message",
-                        "id": "msg_proxy",
+                        "id": self.message_id,
                         "role": "assistant",
                         "content": [{"type": "output_text", "text": self.accumulated_text}],
                         "status": "incomplete",
@@ -2607,6 +2645,8 @@ impl ResponsesStreamStateMachine {
                     "status": "failed",
                     "model": self.model,
                     "output": build_responses_output_array(
+                        &self.message_id,
+                        &self.reasoning_id,
                         &self.accumulated_text,
                         &self.accumulated_reasoning,
                         self.thinking_started,
@@ -2662,7 +2702,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.output_text.done",
                     "output_index": self.output_index - 1,
                     "content_index": 0,
-                    "item_id": "msg_proxy",
+                    "item_id": self.message_id,
                     "text": self.accumulated_text,
                 })));
                 out.push(self.ev(serde_json::json!({
@@ -2670,7 +2710,7 @@ impl ResponsesStreamStateMachine {
                     "output_index": self.output_index - 1,
                     "item": {
                         "type": "message",
-                        "id": "msg_proxy",
+                        "id": self.message_id,
                         "role": "assistant",
                         "content": [{"type": "output_text", "text": self.accumulated_text}],
                         "status": "completed",
@@ -2687,6 +2727,8 @@ impl ResponsesStreamStateMachine {
                     "status": "completed",
                     "model": self.model,
                     "output": build_responses_output_array(
+                        &self.message_id,
+                        &self.reasoning_id,
                         &self.accumulated_text,
                         &self.accumulated_reasoning,
                         self.thinking_started,
@@ -2749,7 +2791,7 @@ impl ResponsesStreamStateMachine {
                     "type": "response.output_text.done",
                     "output_index": self.output_index - 1,
                     "content_index": 0,
-                    "item_id": "msg_proxy",
+                    "item_id": self.message_id,
                     "text": self.accumulated_text,
                 })));
                 self.text_part_open = false;
@@ -2764,7 +2806,7 @@ impl ResponsesStreamStateMachine {
                 "output_index": self.output_index - 1,
                 "item": {
                     "type": "message",
-                    "id": "msg_proxy",
+                    "id": self.message_id,
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": self.accumulated_text}],
                     "status": status,
@@ -2782,6 +2824,8 @@ impl ResponsesStreamStateMachine {
                     "status": "completed",
                     "model": self.model,
                     "output": build_responses_output_array(
+                        &self.message_id,
+                        &self.reasoning_id,
                         &self.accumulated_text,
                         &self.accumulated_reasoning,
                         self.thinking_started,
@@ -2806,6 +2850,8 @@ impl ResponsesStreamStateMachine {
                     "status": "failed",
                     "model": self.model,
                     "output": build_responses_output_array(
+                        &self.message_id,
+                        &self.reasoning_id,
                         &self.accumulated_text,
                         &self.accumulated_reasoning,
                         self.thinking_started,
@@ -2827,6 +2873,8 @@ impl ResponsesStreamStateMachine {
 }
 
 fn build_responses_output_array(
+    message_id: &str,
+    reasoning_id: &str,
     accumulated_text: &str,
     accumulated_reasoning: &str,
     reasoning_started: bool,
@@ -2840,7 +2888,7 @@ fn build_responses_output_array(
     if reasoning_started && !accumulated_reasoning.is_empty() {
         output.push(serde_json::json!({
             "type": "reasoning",
-            "id": "rs_proxy",
+            "id": reasoning_id,
             "summary": [{"type": "summary_text", "text": accumulated_reasoning}],
         }));
     }
@@ -2848,7 +2896,7 @@ fn build_responses_output_array(
     if !accumulated_text.is_empty() {
         output.push(serde_json::json!({
             "type": "message",
-            "id": "msg_proxy",
+            "id": message_id,
             "role": "assistant",
             "content": [{"type": "output_text", "text": accumulated_text}],
             "status": "completed",

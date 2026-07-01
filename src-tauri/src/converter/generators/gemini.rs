@@ -301,6 +301,7 @@ fn convert_gemini_parts(parts: &[IrContentPart]) -> Vec<Value> {
                     json!({ "text": "" })
                 }
             }
+            IrContentPart::Compaction { .. } => serde_json::Value::Null,
             IrContentPart::ToolUse { name, input, .. } => {
                 json!({
                     "functionCall": {
@@ -326,5 +327,6 @@ fn convert_gemini_parts(parts: &[IrContentPart]) -> Vec<Value> {
                 })
             }
         })
+        .filter(|v| !v.is_null())
         .collect()
 }
