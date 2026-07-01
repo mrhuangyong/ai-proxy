@@ -70,7 +70,11 @@ jobs:
   build:
     name: Build ${{ matrix.platform.name }}
     needs: [bump]
-    if: needs.bump.result == 'success'
+    if: |
+      always() && (
+        needs.bump.result == 'success' ||
+        (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push')
+      )
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
@@ -147,7 +151,11 @@ jobs:
 
   release:
     name: Publish Release Assets
-    if: startsWith(github.ref, 'refs/tags/v') || needs.bump.outputs.version != ''
+    if: |
+      always() && (
+        (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push') ||
+        needs.bump.outputs.version != ''
+      )
     needs: [build, bump]
     runs-on: ubuntu-latest
 
