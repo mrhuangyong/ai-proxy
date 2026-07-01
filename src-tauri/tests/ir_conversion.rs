@@ -460,3 +460,133 @@ fn model_matches(model: &str, pattern: &str) -> bool {
     }
     true
 }
+
+/// Compaction items (from /v1/responses/compact) must round-trip through the
+/// Responses parser → IR → Responses generator without losing encrypted_content.
+#[test]
+fn responses_compaction_round_trip() {
+    let parser = ResponsesParser;
+    let generator = ResponsesGenerator;
+
+    // Simulate a request that includes a compaction item in the input array
+    // (what Codex sends after a compact, referencing the previous compaction).
+    let request_body = json!({
+        "model": "gpt-5-codex",
+        "input": [
+            {
+                "type": "compaction",
+                "id": "cmp_abc123",
+                "encrypted_content": "gAAAAABpM0Yj-fake-encrypted-content=="
+            },
+            {
+                "role": "user",
+                "content": "Continue working"
+            }
+        ]
+    });
+
+    let ir = parser.parse_request(&request_body).unwrap();
+    let regenerated = generator.generate_request(&ir).unwrap();
+
+    let input = regenerated["input"].as_array().unwrap();
+    // First item should be the compaction
+    let compaction_item = &input[0];
+    assert_eq!(compaction_item["type"], "compaction");
+    assert_eq!(compaction_item["id"], "cmp_abc123");
+    assert_eq!(
+        compaction_item["encrypted_content"],
+        "gAAAAABpM0Yj-fake-encrypted-content=="
+    );
+}
+
+/// Compaction output items in a response must survive parsing and regeneration.
+#[test]
+fn responses_compaction_output_round_trip() {
+    let parser = ResponsesParser;
+    let generator = ResponsesGenerator;
+
+    // Simulate a compact response with a compaction output item.
+    let response_body = json!({
+        "id": "resp_001",
+        "object": "response.compaction",
+        "status": "completed",
+        "output": [
+            {
+                "type": "compaction",
+                "id": "cmp_001",
+                "encrypted_content": "gAAAAABpM0Yj-encrypted-data=="
+            }
+        ],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150
+        }
+    });
+
+    let ir = parser.parse_response(&response_body).unwrap();
+
+    // Verify compaction content was extracted
+    let has_compaction = ir.message.content.iter().any(|p| {
+        matches!(
+            p,
+            IrContentPart::Compaction { id, encrypted_content }
+                if id == "cmp_001" && encrypted_content == "gAAAAABpM0Yj-encrypted-data=="
+        )
+    });
+    assert!(has_compaction, "compaction item should be in IR content");
+
+    // Regenerate and verify
+    let regenerated = generator.generate_response(&ir).unwrap();
+    let output = regenerated["output"].as_array().unwrap();
+    let compaction_output = output
+        .iter()
+        .find(|o| o["type"] == "compaction")
+        .expect("compaction output item should exist");
+    assert_eq!(compaction_output["id"], "cmp_001");
+    assert_eq!(
+        compaction_output["encrypted_content"],
+        "gAAAAABpM0Yj-encrypted-data=="
+    );
+}
+
+#[test]
+fn completions_extra_fields_roundtrip() {
+    // Test that extra/unknown fields like chat_template_kwargs pass through
+    let body = json!({
+        "model": "deepseek-chat",
+        "messages": [
+            { "role": "user", "content": "hello" }
+        ],
+        "stream": false,
+        "chat_template_kwargs": {
+            "enable_thinking": false
+        }
+    });
+
+    // Parse
+    let parser = CompletionsParser;
+    let ir = parser.parse_request(&body).unwrap();
+
+    // Verify extra was captured
+    let kwargs = ir.extra.get("chat_template_kwargs").expect("chat_template_kwargs should be in extra");
+    assert_eq!(
+        kwargs,
+        &json!({ "enable_thinking": false })
+    );
+
+    // Generate back to completions format
+    let generator = CompletionsGenerator;
+    let output = generator.generate_request(&ir).unwrap();
+
+    // Verify extra field is in the output
+    let output_kwargs = output.get("chat_template_kwargs").expect("chat_template_kwargs should be in generated body");
+    assert_eq!(
+        output_kwargs,
+        &json!({ "enable_thinking": false })
+    );
+
+    // Verify standard fields are still present
+    assert_eq!(output["model"], "deepseek-chat");
+    assert!(output.get("messages").is_some());
+}

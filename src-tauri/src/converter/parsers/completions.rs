@@ -228,6 +228,37 @@ impl FormatParser for CompletionsParser {
             })
         });
 
+        let mut extra = std::collections::HashMap::new();
+        if let Some(obj) = body.as_object() {
+            let known_keys: std::collections::HashSet<&str> = [
+                "model",
+                "messages",
+                "tools",
+                "tool_choice",
+                "temperature",
+                "top_p",
+                "top_k",
+                "max_tokens",
+                "max_completion_tokens",
+                "stream",
+                "stop",
+                "response_format",
+                "presence_penalty",
+                "frequency_penalty",
+                "seed",
+                "reasoning",
+                "stream_options",
+                "user",
+            ]
+            .into_iter()
+            .collect();
+            for (key, val) in obj {
+                if !known_keys.contains(key.as_str()) {
+                    extra.insert(key.clone(), val.clone());
+                }
+            }
+        }
+
         Ok(IrRequest {
             model,
             messages: ir_messages,
@@ -268,7 +299,7 @@ impl FormatParser for CompletionsParser {
             thinking,
             stream_options: body.get("stream_options").cloned(),
             metadata,
-            extra: std::collections::HashMap::new(),
+            extra,
         })
     }
 

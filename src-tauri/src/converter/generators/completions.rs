@@ -205,6 +205,11 @@ impl FormatGenerator for CompletionsGenerator {
 
         // Skip reasoning/thinking for providers that don't support it
 
+        // Pass through any extra parameters (e.g. chat_template_kwargs)
+        for (key, val) in &ir.extra {
+            body[key] = val.clone();
+        }
+
         Ok(body)
     }
 
@@ -412,6 +417,7 @@ fn serialize_content_parts(parts: &[IrContentPart]) -> Vec<Value> {
                     json!({ "type": "image_url", "image_url": { "url": "" } })
                 }
             }
+            IrContentPart::Compaction { .. } => serde_json::Value::Null,
             IrContentPart::ToolUse { id, name, input } => json!({
                 "type": "text",
                 "text": format!("[Tool call: {} ({}) args={}]", name, id, input),
@@ -425,5 +431,6 @@ fn serialize_content_parts(parts: &[IrContentPart]) -> Vec<Value> {
                 "text": format!("[Tool result for {}: {}]", tool_use_id, content),
             }),
         })
+        .filter(|v| !v.is_null())
         .collect()
 }
