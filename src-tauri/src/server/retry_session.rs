@@ -13,7 +13,8 @@ use tokio::time::sleep;
 
 use crate::converter::ir::ClientFormat;
 use crate::server::retry_invisible::{
-    compute_backoff_ms, is_first_business_chunk, should_retry, BufferState, ErrKind, RetryMode,
+    classify_body_error, compute_backoff_ms, is_first_business_chunk, should_retry, BufferState,
+    ErrKind, RetryMode,
 };
 
 /// Check whether the buffered SSE bytes contain a proper stream termination signal
@@ -302,6 +303,18 @@ where
             .await;
             match bytes_result {
                 Ok(Ok(b)) => {
+                    // Some providers (e.g. iflytek) return HTTP 200 with a retryable
+                    // business error embedded in the JSON body. Detect and retry
+                    // before handing the body to the downstream client.
+                    if let Some(err) = classify_body_error(&b, &client_format) {
+                        last_status = Some(status);
+                        last_error = format!("business error in 200 body: {}", err.message);
+                        tracing::warn!("[retry] non-stream 200 body error, retrying: {}", err.message);
+                        let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                        sleep(Duration::from_millis(wait)).await;
+                        attempt += 1;
+                        continue;
+                    }
                     return SessionOutcome::CompletedBuffer {
                         status,
                         bytes: b.to_vec(),
@@ -427,6 +440,25 @@ where
                 };
             }
             buffered.extend_from_slice(&chunk);
+
+            // Before treating any chunk as "first business", check whether the
+            // upstream embedded a retryable business error in the SSE buffer
+            // (providers like iflytek return HTTP 200 + an error event). If so,
+            // retry while we are still in the invisible buffer state.
+            if !hit_first_business {
+                if let Some(err) = classify_body_error(&buffered, &client_format) {
+                    last_status = Some(status);
+                    last_error = format!("business error in stream: {}", err.message);
+                    tracing::warn!(
+                        "[retry] stream business error in buffer, retrying: {}",
+                        err.message
+                    );
+                    let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
+                    sleep(Duration::from_millis(wait)).await;
+                    attempt += 1;
+                    break; // outer loop continues with next attempt
+                }
+            }
 
             // scan chunk for newlines, build complete lines, test for first business
             line_buf.extend_from_slice(&chunk);

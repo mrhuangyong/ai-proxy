@@ -87,6 +87,119 @@ pub fn compute_backoff_ms(attempt: u32, base_ms: u64, retry_after_secs: Option<u
     base_ms.saturating_mul(1u64 << shift)
 }
 
+/// Known transient upstream business error codes that should be retried even
+/// when the upstream returns HTTP 200 (common with Chinese LLM providers that
+/// embed the error in the JSON body). Add provider-specific codes here.
+const RETRYABLE_BUSINESS_CODES: &[&str] = &[
+    "10310", // iflytek: "The system is busy, please try again later."
+];
+
+/// Substrings (case-insensitive) in an error message/type that indicate a
+/// transient, retryable condition. Matched against `error.message` and
+/// `error.type` when no known code matches.
+const RETRYABLE_BUSINESS_KEYWORDS: &[&str] = &[
+    "try again",
+    "try again later",
+    "system is busy",
+    "busy",
+    "overloaded",
+    "overload",
+    "rate limit",
+    "rate_limit",
+    "temporarily unavailable",
+    "temporarily",
+    "service unavailable",
+    "capacity",
+    "congestion",
+];
+
+/// A retryable business error detected inside an otherwise-200 response body.
+#[derive(Debug, Clone)]
+pub struct BodyError {
+    pub message: String,
+}
+
+/// Inspect a 200 response body (non-stream full JSON, or streaming SSE buffer)
+/// for a retryable business error embedded in the JSON `error` field.
+///
+/// Many upstream providers (e.g. iflytek/Spark) return HTTP 200 with a body like
+/// `{"error":{"code":10310,"message":"The system is busy, please try again later."}}`
+/// instead of using a proper 429/5xx status. This classifies such bodies so the
+/// retry loop can mask them.
+///
+/// Returns `Some(BodyError)` when the body is a retryable business error,
+/// `None` otherwise (including unparseable bodies and normal responses).
+///
+/// `format` is currently unused but kept for future format-specific detection
+/// (e.g. Gemini `error` nested under a different key).
+pub fn classify_body_error(body: &[u8], _format: &ClientFormat) -> Option<BodyError> {
+    let text = std::str::from_utf8(body).ok()?;
+    // Collect every JSON candidate: the whole body, plus any `data:` SSE payloads.
+    let mut candidates: Vec<serde_json::Value> = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+        candidates.push(v);
+    }
+    for line in text.lines() {
+        let l = line.trim();
+        let payload = l
+            .strip_prefix("data: ")
+            .or_else(|| l.strip_prefix("data:"))
+            .map(str::trim);
+        if let Some(raw) = payload {
+            if raw == "[DONE]" {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+                candidates.push(v);
+            }
+        }
+    }
+    for v in candidates {
+        if let Some(err) = extract_retryable_error(&v) {
+            return Some(err);
+        }
+    }
+    None
+}
+
+/// Walk common error locations in a JSON value and decide if it is retryable.
+fn extract_retryable_error(v: &serde_json::Value) -> Option<BodyError> {
+    // Top-level error object: {"error": {...}} (OpenAI/Anthropic/iflytek shape)
+    // Also handle Anthropic top-level: {"type":"error","error":{...}}
+    let err_obj = v.get("error").filter(|e| e.is_object())?;
+    let code = err_obj.get("code").and_then(|c| c.as_str()).unwrap_or("");
+    let code_num = err_obj.get("code").and_then(|c| c.as_i64());
+    let message = err_obj
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    let etype = err_obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    // 1. Known transient code (string or numeric form).
+    if !code.is_empty() && RETRYABLE_BUSINESS_CODES.contains(&code) {
+        return Some(BodyError {
+            message: format!("code {} {}", code, message),
+        });
+    }
+    if let Some(n) = code_num {
+        if RETRYABLE_BUSINESS_CODES.contains(&n.to_string().as_str()) {
+            return Some(BodyError {
+                message: format!("code {} {}", n, message),
+            });
+        }
+    }
+
+    // 2. Keyword match against message + type (case-insensitive).
+    let haystack = format!("{} {}", message, etype).to_lowercase();
+    if RETRYABLE_BUSINESS_KEYWORDS.iter().any(|kw| haystack.contains(kw)) {
+        let label = if etype.is_empty() { "business_error" } else { etype };
+        return Some(BodyError {
+            message: format!("{} {}", label, message),
+        });
+    }
+    None
+}
+
 /// Returns true if the SSE line is the first "business" chunk — i.e., the
 /// first delta carrying actual content (text / thinking / tool call).
 ///
@@ -357,6 +470,55 @@ mod tests {
         // Non-empty reasoning_content counts (DeepSeek-style thinking).
         let line = r#"data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}"#;
         assert!(is_first_business_chunk(&ClientFormat::Completions, line));
+    }
+
+    #[test]
+    fn classify_body_error_detects_iflytek_10310() {
+        // Real-world iflytek error: HTTP 200 with body error.
+        let body = br#"{"error":{"code":10310,"message":"The system is busy, please try again later.","type":"api_error"},"id":"cht000d30ab@dx19f20b82a952871503","type":"error"}"#;
+        let err = classify_body_error(body, &ClientFormat::Anthropic)
+            .expect("iflytek 10310 should be classified as retryable");
+        assert!(err.message.contains("10310"));
+    }
+
+    #[test]
+    fn classify_body_error_detects_string_code() {
+        let body = br#"{"error":{"code":"10310","message":"busy"}}"#;
+        assert!(classify_body_error(body, &ClientFormat::Anthropic).is_some());
+    }
+
+    #[test]
+    fn classify_body_error_detects_keyword_only() {
+        // No known code, but message has "try again later" keyword.
+        let body = br#"{"error":{"code":"custom-1","message":"Server is overloaded, please try again later"}}"#;
+        let err = classify_body_error(body, &ClientFormat::Anthropic)
+            .expect("keyword match should classify as retryable");
+        assert!(err.message.contains("overloaded") || err.message.contains("try again"));
+    }
+
+    #[test]
+    fn classify_body_error_ignores_normal_response() {
+        // A normal non-stream completion response has no top-level `error`.
+        let body = br#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#;
+        assert!(classify_body_error(body, &ClientFormat::Completions).is_none());
+
+        // A normal streaming SSE buffer.
+        let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n";
+        assert!(classify_body_error(body, &ClientFormat::Completions).is_none());
+    }
+
+    #[test]
+    fn classify_body_error_ignores_non_retryable_error() {
+        // Has an error but it's a permanent auth failure — no code/keyword match.
+        let body = br#"{"error":{"code":"invalid_api_key","message":"Invalid API key"}}"#;
+        assert!(classify_body_error(body, &ClientFormat::Anthropic).is_none());
+    }
+
+    #[test]
+    fn classify_body_error_detects_sse_error_event() {
+        // Anthropic-style SSE error event inside a streaming buffer.
+        let body = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+        assert!(classify_body_error(body, &ClientFormat::Anthropic).is_some());
     }
 
     #[test]
