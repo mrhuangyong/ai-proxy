@@ -191,21 +191,38 @@ impl FormatGenerator for AnthropicGenerator {
         }
 
         if let Some(thinking) = &ir.thinking {
-            if thinking.enabled {
-                let budget = thinking.budget_tokens.unwrap_or(10000);
-                body["thinking"] = json!({
-                    "type": "enabled",
-                    "budget_tokens": budget,
-                });
-                let current_max = ir.max_tokens.unwrap_or(4096);
-                if current_max <= budget {
-                    tracing::warn!(
-                        "max_tokens ({}) <= budget_tokens ({}), adjusting to {}",
-                        current_max,
-                        budget,
-                        budget + 4096
-                    );
-                    body["max_tokens"] = json!(budget + 4096);
+            use crate::converter::ir::ThinkingMode;
+            match thinking.mode {
+                ThinkingMode::Enabled => {
+                    let budget = thinking.budget_tokens.unwrap_or(10000);
+                    let mut thinking_obj = json!({
+                        "type": "enabled",
+                        "budget_tokens": budget,
+                    });
+                    if let Some(d) = &thinking.display {
+                        thinking_obj["display"] = json!(d);
+                    }
+                    body["thinking"] = thinking_obj;
+                    let current_max = ir.max_tokens.unwrap_or(4096);
+                    if current_max <= budget {
+                        tracing::warn!(
+                            "max_tokens ({}) <= budget_tokens ({}), adjusting to {}",
+                            current_max,
+                            budget,
+                            budget + 4096
+                        );
+                        body["max_tokens"] = json!(budget + 4096);
+                    }
+                }
+                ThinkingMode::Adaptive => {
+                    let mut thinking_obj = json!({ "type": "adaptive" });
+                    if let Some(d) = &thinking.display {
+                        thinking_obj["display"] = json!(d);
+                    }
+                    body["thinking"] = thinking_obj;
+                }
+                ThinkingMode::Disabled => {
+                    body["thinking"] = json!({ "type": "disabled" });
                 }
             }
         }

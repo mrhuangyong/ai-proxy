@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::converter::ir::{
     IrContentPart, IrMessage, IrRequest, IrResponse, IrRole, IrStreamChunk, IrThinkingConfig,
-    IrTool, IrToolCall, IrToolCallDelta, IrUsage,
+    IrTool, IrToolCall, IrToolCallDelta, IrUsage, ThinkingMode,
 };
 use crate::converter::FormatParser;
 use crate::error::ProxyError;
@@ -32,24 +32,21 @@ impl FormatParser for AnthropicParser {
                 });
             }
         } else if let Some(system_arr) = body["system"].as_array() {
-            let mut system_texts = Vec::new();
+            let mut system_parts: Vec<IrContentPart> = Vec::new();
             for part in system_arr {
                 if part["type"].as_str() == Some("text") {
                     if let Some(text) = part["text"].as_str() {
-                        system_texts.push(text.to_string());
+                        system_parts.push(IrContentPart::Text {
+                            text: text.to_string(),
+                            citations: None,
+                        });
                     }
                 }
             }
-            if !system_texts.is_empty() {
+            if !system_parts.is_empty() {
                 messages.push(IrMessage {
                     role: IrRole::System,
-                    content: system_texts
-                        .into_iter()
-                        .map(|text| IrContentPart::Text {
-                            text,
-                            citations: None,
-                        })
-                        .collect(),
+                    content: system_parts,
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
@@ -98,13 +95,21 @@ impl FormatParser for AnthropicParser {
         let response_format = body.get("response_format").cloned();
 
         let thinking = body.get("thinking").and_then(|t| {
-            let enabled = t["type"].as_str() == Some("enabled");
+            let mode = match t["type"].as_str()? {
+                "enabled" => ThinkingMode::Enabled,
+                "adaptive" => ThinkingMode::Adaptive,
+                "disabled" => ThinkingMode::Disabled,
+                _ => return None,
+            };
+            let display = t.get("display").and_then(|v| v.as_str()).map(String::from);
+            let budget_tokens = t
+                .get("budget_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
             Some(IrThinkingConfig {
-                enabled,
-                budget_tokens: t
-                    .get("budget_tokens")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32),
+                mode,
+                budget_tokens,
+                display,
             })
         });
 

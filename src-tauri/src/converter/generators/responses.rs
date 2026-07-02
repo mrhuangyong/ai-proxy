@@ -147,7 +147,7 @@ impl FormatGenerator for ResponsesGenerator {
         }
 
         if let Some(thinking) = &ir.thinking {
-            if thinking.enabled {
+            if thinking.mode == crate::converter::ir::ThinkingMode::Enabled {
                 if let Some(budget) = thinking.budget_tokens {
                     let effort = if budget <= 5000 {
                         "low"

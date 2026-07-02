@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::converter::ir::{
     IrContentPart, IrMessage, IrRequest, IrResponse, IrRole, IrStreamChunk, IrStreamError,
-    IrThinkingConfig, IrTool, IrToolCall, IrToolCallDelta, IrUsage,
+    IrThinkingConfig, IrTool, IrToolCall, IrToolCallDelta, IrUsage, ThinkingMode,
 };
 use crate::converter::FormatParser;
 use crate::error::ProxyError;
@@ -101,13 +101,14 @@ impl FormatParser for ResponsesParser {
         let thinking = body.get("reasoning").and_then(|r| {
             let effort = r.get("effort")?.as_str()?;
             Some(IrThinkingConfig {
-                enabled: true,
+                mode: ThinkingMode::Enabled,
                 budget_tokens: match effort {
                     "low" => Some(5000),
                     "medium" => Some(10000),
                     "high" => Some(30000),
                     _ => Some(10000),
                 },
+                display: None,
             })
         });
 

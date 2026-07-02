@@ -170,7 +170,9 @@ impl FormatGenerator for CompletionsGenerator {
         }
 
         if let Some(max_tokens) = ir.max_tokens {
-            if ir.thinking.as_ref().map_or(false, |t| t.enabled) {
+            if ir.thinking.as_ref().map_or(false, |t| {
+                t.mode == crate::converter::ir::ThinkingMode::Enabled
+            }) {
                 body["max_completion_tokens"] = json!(max_tokens);
             } else {
                 body["max_tokens"] = json!(max_tokens);
