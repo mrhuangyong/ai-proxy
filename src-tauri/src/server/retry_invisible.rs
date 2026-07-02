@@ -127,12 +127,33 @@ pub fn is_first_business_chunk(format: &ClientFormat, line: &str) -> bool {
 
 fn matches_first_for_format(format: &ClientFormat, v: &serde_json::Value) -> bool {
     match format {
-        ClientFormat::Completions => v["choices"]
-            .get(0)
-            .and_then(|c| c.get("delta"))
-            .and_then(|d| d.get("content"))
-            .and_then(|c| c.as_str())
-            .map_or(false, |s| !s.is_empty()),
+        ClientFormat::Completions => {
+            if let Some(delta) = v["choices"].get(0).and_then(|c| c.get("delta")) {
+                // Non-empty text content counts as first business byte.
+                if delta
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .map_or(false, |s| !s.is_empty())
+                {
+                    return true;
+                }
+                // Tool-call deltas count too: a tool_call request is real output,
+                // and treating it as "not first" would buffer it forever in
+                // PreFirstToken mode, hanging tool-calling streaming requests.
+                if delta.get("tool_calls").is_some() {
+                    return true;
+                }
+                // Non-empty reasoning_content (DeepSeek-style thinking) counts.
+                if delta
+                    .get("reasoning_content")
+                    .and_then(|c| c.as_str())
+                    .map_or(false, |s| !s.is_empty())
+                {
+                    return true;
+                }
+            }
+            false
+        }
         ClientFormat::Anthropic => {
             // content_block_delta with text_delta / input_json_delta / thinking_delta
             let t = v["type"].as_str().unwrap_or("");
@@ -317,6 +338,25 @@ mod tests {
             &ClientFormat::Completions,
             "data: [DONE]"
         ));
+    }
+
+    #[test]
+    fn first_chunk_openai_completions_tool_calls() {
+        // A streaming tool_call delta (no content) MUST count as first business,
+        // otherwise PreFirstToken mode buffers it forever and hangs the request.
+        let line = r#"data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}"#;
+        assert!(
+            is_first_business_chunk(&ClientFormat::Completions, line),
+            "tool_call delta must be treated as first business chunk"
+        );
+
+        // Incremental arguments fragment also counts.
+        let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}"#;
+        assert!(is_first_business_chunk(&ClientFormat::Completions, line));
+
+        // Non-empty reasoning_content counts (DeepSeek-style thinking).
+        let line = r#"data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}"#;
+        assert!(is_first_business_chunk(&ClientFormat::Completions, line));
     }
 
     #[test]
