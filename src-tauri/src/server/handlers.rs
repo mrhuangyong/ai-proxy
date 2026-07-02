@@ -313,6 +313,11 @@ pub(crate) async fn handle_proxy_inner(
     // Pre-process: extract system-role messages from messages array into top-level system field
     // when the setting is enabled. This fixes Claude Code v2.1.153+ which puts role:"system"
     // inside messages instead of the top-level system parameter.
+    //
+    // IMPORTANT: only apply this for Anthropic-format clients. The top-level `system` field
+    // is only valid in the Anthropic Messages API. For Completions/Responses/Gemini clients,
+    // extracting system out of messages would orphan the prompt — those formats keep system
+    // as a message role inside `messages`, and their generators don't read a top-level `system`.
     {
         let pool_ref = crate::db::pool::get_pool().await;
         let rows: Vec<(String, String)> = sqlx::query_as(
@@ -327,7 +332,7 @@ pub(crate) async fn handle_proxy_inner(
             .map(|v| v == "true")
             .unwrap_or(true);
 
-        if enabled {
+        if enabled && client_format == ClientFormat::Anthropic {
             if let Some(msgs) = body_value
                 .get_mut("messages")
                 .and_then(|m| m.as_array_mut())
@@ -707,6 +712,21 @@ pub(crate) async fn handle_proxy_inner(
                     "[UPSTREAM] extra fields present in IR: {:?}, body has chat_template_kwargs: {}",
                     ir_request_for_upstream.extra.keys().collect::<Vec<_>>(),
                     b.get("chat_template_kwargs").is_some()
+                );
+            }
+            // ALWAYS log the complete upstream request body at info level
+            // so the user can verify exactly what gets sent upstream
+            if let Ok(json_str) = serde_json::to_string(&b) {
+                let upstream_host = route.base_url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("unknown");
+                tracing::info!("[UPSTREAM_BODY] {} {} body={}",
+                    ir_request_for_upstream.model,
+                    upstream_host,
+                    json_str
                 );
             }
             b
