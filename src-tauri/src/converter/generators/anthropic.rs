@@ -214,6 +214,17 @@ impl FormatGenerator for AnthropicGenerator {
             // cache_control is per-element, not top-level
         }
 
+        // Pass through any extra parameters
+        if !ir.extra.is_empty() {
+            tracing::debug!("AnthropicGenerator injecting {} extra field(s) into upstream body", ir.extra.len());
+        }
+        for (key, val) in &ir.extra {
+            if key != "has_cache_control" && key != "metadata" {
+                tracing::trace!("AnthropicGenerator extra: {} = {}", key, val);
+                body[key] = val.clone();
+            }
+        }
+
         Ok(body)
     }
 

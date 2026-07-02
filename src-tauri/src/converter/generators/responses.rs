@@ -165,6 +165,17 @@ impl FormatGenerator for ResponsesGenerator {
             body["previous_response_id"] = prev_id.clone();
         }
 
+        // Pass through any extra parameters not already handled above
+        if !ir.extra.is_empty() {
+            tracing::debug!("ResponsesGenerator injecting {} extra field(s) into upstream body", ir.extra.len());
+        }
+        for (key, val) in &ir.extra {
+            if key != "previous_response_id" {
+                tracing::trace!("ResponsesGenerator extra: {} = {}", key, val);
+                body[key] = val.clone();
+            }
+        }
+
         Ok(body)
     }
 

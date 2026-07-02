@@ -700,7 +700,17 @@ pub(crate) async fn handle_proxy_inner(
     }
 
     let target_body = match target_generator.generate_request(&ir_request_for_upstream) {
-        Ok(b) => b,
+        Ok(b) => {
+            // Log extra fields for debugging
+            if !ir_request_for_upstream.extra.is_empty() {
+                tracing::info!(
+                    "[UPSTREAM] extra fields present in IR: {:?}, body has chat_template_kwargs: {}",
+                    ir_request_for_upstream.extra.keys().collect::<Vec<_>>(),
+                    b.get("chat_template_kwargs").is_some()
+                );
+            }
+            b
+        }
         Err(e) => {
             let err_msg = format!("request generation error: {}", e);
             if let Err(le) = log_request_entry(
