@@ -206,7 +206,11 @@ impl FormatGenerator for CompletionsGenerator {
         // Skip reasoning/thinking for providers that don't support it
 
         // Pass through any extra parameters (e.g. chat_template_kwargs)
+        if !ir.extra.is_empty() {
+            tracing::debug!("CompletionsGenerator injecting {} extra field(s) into upstream body", ir.extra.len());
+        }
         for (key, val) in &ir.extra {
+            tracing::trace!("CompletionsGenerator extra: {} = {}", key, val);
             body[key] = val.clone();
         }
 

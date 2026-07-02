@@ -589,4 +589,20 @@ fn completions_extra_fields_roundtrip() {
     // Verify standard fields are still present
     assert_eq!(output["model"], "deepseek-chat");
     assert!(output.get("messages").is_some());
+
+    // Verify the serialized JSON contains the field
+    let serialized = serde_json::to_string(&output).unwrap();
+    assert!(
+        serialized.contains("chat_template_kwargs"),
+        "serialized JSON should contain chat_template_kwargs, got: {}",
+        serialized
+    );
+    assert!(
+        serialized.contains("enable_thinking"),
+        "serialized JSON should contain enable_thinking, got: {}",
+        serialized
+    );
+
+    // Full end-to-end: also test that the serializer produces valid request JSON
+    eprintln!("FULL JSON OUTPUT: {}", serialized);
 }
