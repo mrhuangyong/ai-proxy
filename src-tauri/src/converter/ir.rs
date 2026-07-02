@@ -55,10 +55,20 @@ pub struct IrRequest {
     pub extra: HashMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingMode {
+    Enabled,
+    Adaptive,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IrThinkingConfig {
-    pub enabled: bool,
+    pub mode: ThinkingMode,
     pub budget_tokens: Option<u32>,
+    /// Anthropic-specific display control: "summarized" | "omitted".
+    pub display: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

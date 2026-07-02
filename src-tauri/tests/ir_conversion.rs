@@ -606,3 +606,78 @@ fn completions_extra_fields_roundtrip() {
     // Full end-to-end: also test that the serializer produces valid request JSON
     eprintln!("FULL JSON OUTPUT: {}", serialized);
 }
+
+#[test]
+fn anthropic_adaptive_thinking_roundtrip() {
+    // Official Anthropic example: "thinking": {"type": "adaptive"}
+    let body = json!({
+        "model": "claude-opus-4-6",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "Hello, world"}],
+        "thinking": {"type": "adaptive"}
+    });
+
+    let ir = AnthropicParser.parse_request(&body).unwrap();
+    let thinking = ir.thinking.as_ref().expect("thinking should be parsed");
+    assert_eq!(thinking.mode, ThinkingMode::Adaptive);
+
+    let out = AnthropicGenerator.generate_request(&ir).unwrap();
+    assert_eq!(out["thinking"]["type"], "adaptive");
+}
+
+#[test]
+fn anthropic_enabled_thinking_with_budget_and_display_roundtrip() {
+    let body = json!({
+        "model": "claude-opus-4-6",
+        "max_tokens": 8192,
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "budget_tokens": 4096, "display": "omitted"}
+    });
+
+    let ir = AnthropicParser.parse_request(&body).unwrap();
+    let thinking = ir.thinking.as_ref().unwrap();
+    assert_eq!(thinking.mode, ThinkingMode::Enabled);
+    assert_eq!(thinking.budget_tokens, Some(4096));
+    assert_eq!(thinking.display.as_deref(), Some("omitted"));
+
+    let out = AnthropicGenerator.generate_request(&ir).unwrap();
+    assert_eq!(out["thinking"]["type"], "enabled");
+    assert_eq!(out["thinking"]["budget_tokens"], 4096);
+    assert_eq!(out["thinking"]["display"], "omitted");
+}
+
+#[test]
+fn anthropic_disabled_thinking_roundtrip() {
+    let body = json!({
+        "model": "claude-opus-4-6",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "disabled"}
+    });
+
+    let ir = AnthropicParser.parse_request(&body).unwrap();
+    let thinking = ir.thinking.as_ref().unwrap();
+    assert_eq!(thinking.mode, ThinkingMode::Disabled);
+
+    let out = AnthropicGenerator.generate_request(&ir).unwrap();
+    assert_eq!(out["thinking"]["type"], "disabled");
+}
+
+#[test]
+fn anthropic_system_array_roundtrip() {
+    // Official example: system as array of TextBlockParam
+    let body = json!({
+        "model": "claude-opus-4-6",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "system": [{"text": "Today's date is 2024-06-01.", "type": "text"}]
+    });
+
+    let ir = AnthropicParser.parse_request(&body).unwrap();
+    // system should become a System-role message
+    assert!(ir.messages.iter().any(|m| m.role == IrRole::System));
+
+    let out = AnthropicGenerator.generate_request(&ir).unwrap();
+    // system must be present (string form for the common no-cache case)
+    assert_eq!(out["system"], "Today's date is 2024-06-01.");
+}

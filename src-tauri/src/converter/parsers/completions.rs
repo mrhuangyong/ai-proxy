@@ -218,13 +218,14 @@ impl FormatParser for CompletionsParser {
         let thinking = body.get("reasoning").and_then(|r| {
             let effort = r["effort"].as_str().unwrap_or("medium");
             Some(IrThinkingConfig {
-                enabled: true,
+                mode: ThinkingMode::Enabled,
                 budget_tokens: match effort {
                     "low" => Some(5000),
                     "medium" => Some(10000),
                     "high" => Some(30000),
                     _ => None,
                 },
+                display: None,
             })
         });
 
