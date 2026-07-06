@@ -122,6 +122,7 @@ async fn create_provider(
         .bind(&key_id).bind(&id).bind(&body.name).bind(&encrypted).bind(&nonce.as_slice())
         .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
 
+    mark_sync_dirty(pool).await;
     Ok(ok(id))
 }
 
@@ -180,6 +181,7 @@ async fn update_provider(
         }
     }
 
+    mark_sync_dirty(pool).await;
     Ok(ok(()))
 }
 
@@ -277,6 +279,7 @@ async fn delete_provider(Path(id): Path<String>) -> Result<Json<ApiResponse<()>>
         .execute(pool)
         .await
         .map_err(|e| err_json(e.to_string()))?;
+    mark_sync_dirty(pool).await;
     Ok(ok(()))
 }
 
@@ -284,7 +287,11 @@ async fn toggle_provider(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, Json<ApiError>> {
     match ProviderManager::toggle_enabled(&id).await {
-        Ok(new_enabled) => Ok(ok(serde_json::json!({ "enabled": new_enabled }))),
+        Ok(new_enabled) => {
+            let pool = get_pool().await;
+            mark_sync_dirty(pool).await;
+            Ok(ok(serde_json::json!({ "enabled": new_enabled })))
+        }
         Err(e) => Err(err_json(e.to_string())),
     }
 }
@@ -723,6 +730,7 @@ async fn create_rule(
         value: "true".into(),
     });
 
+    mark_sync_dirty(pool).await;
     Ok(ok(InterceptorRule {
         id,
         name: body.name,
@@ -771,6 +779,7 @@ async fn update_rule(
     ).bind(&name).bind(&phase).bind(&condition_json).bind(&action_json).bind(priority).bind(enabled).bind(&id)
     .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
 
+    mark_sync_dirty(pool).await;
     Ok(ok(()))
 }
 
@@ -781,6 +790,7 @@ async fn delete_rule(Path(id): Path<String>) -> Result<Json<ApiResponse<()>>, Js
         .execute(pool)
         .await
         .map_err(|e| err_json(e.to_string()))?;
+    mark_sync_dirty(pool).await;
     Ok(ok(()))
 }
 
@@ -932,6 +942,7 @@ async fn update_settings(
                 .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
         }
     }
+    mark_sync_dirty(pool).await;
     Ok(ok(()))
 }
 
@@ -1375,6 +1386,24 @@ async fn handle_runtime_logs_ws(mut socket: WebSocket) {
 
 // --- Backup handlers ---
 
+/// Mark sync_dirty=true if sync_on_change is enabled. Best-effort, never fails the caller.
+pub(crate) async fn mark_sync_dirty(pool: &sqlx::SqlitePool) {
+    let on: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM settings WHERE key = 'sync_on_change'",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if on.as_ref().map(|(v,)| v.as_str()) == Some("true") {
+        let _ = sqlx::query(
+            "UPDATE settings SET value='true', updated_at=datetime('now') WHERE key='sync_dirty'",
+        )
+        .execute(pool)
+        .await;
+    }
+}
+
 #[derive(Serialize)]
 struct BackupStatus {
     passphrase_set: bool,
@@ -1456,8 +1485,12 @@ async fn import_backup(
     crate::backup::import::import_bundle(pool, &bytes, body.passphrase.as_deref())
         .await
         .map_err(|e| err_json(e.to_string()))?;
+    // No pre-restore snapshot is written: the import is atomic (single
+    // transaction), and the previous `snapshot_saved: true` was a lie (the
+    // snapshot helper computed a bundle then discarded it). Frontend does
+    // not read this field; returned false to stay honest.
     Ok(ok(ImportResult {
-        snapshot_saved: true,
+        snapshot_saved: false,
     }))
 }
 

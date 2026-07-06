@@ -306,6 +306,54 @@ async fn test_export_produces_valid_bundle() {
     // api_keys should have re-encrypted encrypted_key (base64 string, non-empty).
     assert!(v["data"]["api_keys"][0]["encrypted_key"].is_string());
     assert_ne!(v["data"]["api_keys"][0]["encrypted_key"], "");
+
+    // Machine-bound secrets must NEVER appear in a portable backup — they are
+    // encrypted with the source machine's master key and undecryptable elsewhere.
+    let settings = v["data"]["settings"].as_array().unwrap();
+    let keys: Vec<&str> = settings
+        .iter()
+        .map(|row| row["key"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        !keys.contains(&"backup_passphrase"),
+        "backup_passphrase leaked into export bundle"
+    );
+    assert!(
+        !keys.contains(&"sync_webdav_password"),
+        "sync_webdav_password leaked into export bundle"
+    );
+}
+
+/// Verify that even when `backup_passphrase` / `sync_webdav_password` are present
+/// in the DB (machine-bound ciphertext), they are filtered out of the export.
+#[tokio::test]
+async fn test_export_filters_machine_bound_secrets() {
+    let pool = setup_pool().await;
+    // Seed machine-bound secret rows as they'd exist in production.
+    sqlx::query("UPDATE settings SET value = 'ciphertext:nonce' WHERE key = 'backup_passphrase'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE settings SET value = 'ciphertext:nonce' WHERE key = 'sync_webdav_password'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let bytes = export_bundle_with_passphrase(&pool, "pw").await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let settings = v["data"]["settings"].as_array().unwrap();
+    let keys: Vec<&str> = settings
+        .iter()
+        .map(|row| row["key"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        !keys.contains(&"backup_passphrase"),
+        "backup_passphrase must be filtered from export"
+    );
+    assert!(
+        !keys.contains(&"sync_webdav_password"),
+        "sync_webdav_password must be filtered from export"
+    );
 }
 
 #[tokio::test]

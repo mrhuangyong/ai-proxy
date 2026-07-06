@@ -38,6 +38,14 @@ pub async fn export_bundle_with_passphrase(
     data.users = read_table(pool, "users", empty).await?;
     data.settings = read_table(pool, "settings", empty).await?;
 
+    // Filter out machine-bound secret rows — these are encrypted with the source
+    // machine's master key and cannot be decrypted on a different machine.
+    // The target machine must set its own passphrase / WebDAV password.
+    data.settings.retain(|row| {
+        let k = row.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        !matches!(k, "backup_passphrase" | "sync_webdav_password")
+    });
+
     // Re-encrypt sensitive fields with the passphrase key.
     encrypt_api_keys(&mut data.api_keys, &key)?;
     encrypt_sensitive_settings(&mut data.settings, &key)?;

@@ -8,7 +8,7 @@ use sqlx::FromRow;
 use crate::db::get_pool;
 use crate::error::ProxyError;
 use crate::provider::manager::ProviderManager;
-use crate::server::api::{err_json, ok, ApiError, ApiResponse};
+use crate::server::api::{err_json, mark_sync_dirty, ok, ApiError, ApiResponse};
 use crate::virtual_model::manager::DbMapping;
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -138,6 +138,7 @@ pub async fn create_virtual_model(
         .await;
     }
 
+    mark_sync_dirty(pool).await;
     Ok(ok(id))
 }
 
@@ -179,6 +180,7 @@ pub async fn update_virtual_model(
         .execute(pool)
         .await;
     }
+    mark_sync_dirty(pool).await;
     Ok(ok(()))
 }
 
@@ -191,6 +193,7 @@ pub async fn delete_virtual_model(
         .execute(pool)
         .await
         .map_err(|e| err_json(format!("db: {}", e)))?;
+    mark_sync_dirty(pool).await;
     Ok(ok(()))
 }
 

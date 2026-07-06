@@ -31,14 +31,19 @@ pub async fn import_bundle(
 
     // Decrypt sensitive fields back to DB form.
     let mut data = bundle.data;
+    // Defensive: never let an imported bundle clobber machine-bound secrets.
+    // These are set per-machine via the passphrase / sync-config UIs.
+    data.settings.retain(|row| {
+        let k = row.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        !matches!(k, "backup_passphrase" | "sync_webdav_password")
+    });
     decrypt_api_keys(&mut data.api_keys, &key)?;
     decrypt_sensitive_settings(&mut data.settings, &key)?;
     decrypt_mcp_secrets(&mut data.mcp_servers, &key)?;
 
-    // 2. Snapshot current data (best-effort, for disaster recovery).
-    let _ = write_pre_restore_snapshot(pool).await;
-
-    // 3. Transactional DELETE + INSERT per table.
+    // 2. Transactional DELETE + INSERT per table. Atomicity is guaranteed by the
+    // transaction — the old `write_pre_restore_snapshot` was a no-op that lied
+    // about saving a snapshot (it computed a bundle then discarded it).
     let mut tx = pool.begin().await?;
     for (table, rows) in [
         ("providers", &data.providers),
@@ -227,18 +232,6 @@ fn decrypt_mcp_secrets(rows: &mut [serde_json::Value], key: &[u8; 32]) -> Backup
             }
         }
     }
-    Ok(())
-}
-
-async fn write_pre_restore_snapshot(pool: &SqlitePool) -> BackupResult<()> {
-    // Best-effort: serialize current DB to a snapshot dir. On failure, log and continue.
-    let dir = std::env::temp_dir().join("ai-proxy-snapshots");
-    let _ = std::fs::create_dir_all(&dir);
-    match super::export::export_bundle_with_passphrase(pool, "").await {
-        Ok(_) => { /* snapshot logic can be enhanced; placeholder */ }
-        Err(_) => { /* passphrase may not be set; skip snapshot */ }
-    }
-    let _ = dir;
     Ok(())
 }
 
