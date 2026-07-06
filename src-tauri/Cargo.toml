@@ -37,6 +37,7 @@ humantime = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
+quick-xml = "0.36"
 futures = "0.3"
 async-stream = "0.3"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
