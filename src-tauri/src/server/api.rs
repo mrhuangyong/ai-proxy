@@ -1373,6 +1373,266 @@ async fn handle_runtime_logs_ws(mut socket: WebSocket) {
     }
 }
 
+// --- Backup handlers ---
+
+#[derive(Serialize)]
+struct BackupStatus {
+    passphrase_set: bool,
+}
+
+async fn backup_status() -> Result<Json<ApiResponse<BackupStatus>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let set = crate::backup::export::read_stored_passphrase(pool).await.is_ok();
+    Ok(ok(BackupStatus { passphrase_set: set }))
+}
+
+#[derive(Deserialize)]
+struct SetPassphraseBody {
+    new_passphrase: String,
+    old_passphrase: Option<String>,
+}
+
+async fn set_passphrase(
+    axum::Json(body): axum::Json<SetPassphraseBody>,
+) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
+    if body.new_passphrase.len() < 8 {
+        return Err(err_json("口令至少需要 8 位"));
+    }
+    let pool = get_pool().await;
+    // If a passphrase already exists, require correct old_passphrase.
+    if let Ok(existing) = crate::backup::export::read_stored_passphrase(pool).await {
+        let old = body.old_passphrase.as_deref().unwrap_or("");
+        if old != existing {
+            return Err(err_json("当前口令不正确"));
+        }
+    }
+    crate::backup::export::store_passphrase(pool, &body.new_passphrase)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(()))
+}
+
+#[derive(Serialize)]
+struct ExportResult {
+    data: String, // base64-encoded JSON bytes
+}
+
+async fn export_backup() -> Result<Json<ApiResponse<ExportResult>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let _guard = crate::backup::backup_lock().lock().await;
+    let bytes = crate::backup::export::export_bundle(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    Ok(ok(ExportResult { data: B64.encode(&bytes) }))
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    file_bytes: String, // base64-encoded
+    passphrase: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ImportResult {
+    snapshot_saved: bool,
+}
+
+async fn import_backup(
+    axum::Json(body): axum::Json<ImportBody>,
+) -> Result<Json<ApiResponse<ImportResult>>, Json<ApiError>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    let bytes = B64.decode(&body.file_bytes).map_err(|e| err_json(e.to_string()))?;
+    let pool = get_pool().await;
+    let _guard = crate::backup::backup_lock().lock().await;
+    crate::backup::import::import_bundle(pool, &bytes, body.passphrase.as_deref())
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(ImportResult { snapshot_saved: true }))
+}
+
+// --- Sync handlers ---
+
+#[derive(Serialize)]
+struct SyncConfigResponse {
+    enabled: bool,
+    webdav_url: String,
+    webdav_username: String,
+    webdav_path: String,
+    auto_enabled: bool,
+    auto_interval_minutes: u32,
+    sync_on_change: bool,
+}
+
+impl From<crate::sync::config::SyncConfig> for SyncConfigResponse {
+    fn from(c: crate::sync::config::SyncConfig) -> Self {
+        Self {
+            enabled: c.enabled,
+            webdav_url: c.webdav_url,
+            webdav_username: c.webdav_username,
+            webdav_path: c.webdav_path,
+            auto_enabled: c.auto_enabled,
+            auto_interval_minutes: c.auto_interval_minutes,
+            sync_on_change: c.sync_on_change,
+        }
+    }
+}
+
+async fn get_sync_config() -> Result<Json<ApiResponse<SyncConfigResponse>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let cfg = crate::sync::config::load_config(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(SyncConfigResponse::from(cfg)))
+}
+
+#[derive(Deserialize)]
+struct UpdateSyncConfigBody {
+    enabled: Option<bool>,
+    webdav_url: Option<String>,
+    webdav_username: Option<String>,
+    webdav_password: Option<String>,
+    webdav_path: Option<String>,
+    auto_enabled: Option<bool>,
+    auto_interval_minutes: Option<u32>,
+    sync_on_change: Option<bool>,
+}
+
+async fn update_sync_config(
+    axum::Json(body): axum::Json<UpdateSyncConfigBody>,
+) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let mut cfg = crate::sync::config::load_config(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    if let Some(v) = body.enabled { cfg.enabled = v; }
+    if let Some(v) = body.webdav_url { cfg.webdav_url = v; }
+    if let Some(v) = body.webdav_username { cfg.webdav_username = v; }
+    if let Some(v) = body.webdav_password { cfg.webdav_password = v; }
+    if let Some(v) = body.webdav_path { cfg.webdav_path = v; }
+    if let Some(v) = body.auto_enabled { cfg.auto_enabled = v; }
+    if let Some(v) = body.auto_interval_minutes { cfg.auto_interval_minutes = v; }
+    if let Some(v) = body.sync_on_change { cfg.sync_on_change = v; }
+    crate::sync::config::save_config(pool, &cfg)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(()))
+}
+
+async fn test_sync_connection() -> Result<Json<ApiResponse<serde_json::Value>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let cfg = crate::sync::config::load_config(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    let client = match crate::sync::webdav::WebDavClient::from_config(&cfg) {
+        Ok(c) => c,
+        Err(e) => return Ok(ok(serde_json::json!({"success": false, "error": e.to_string()}))),
+    };
+    match client.test_connection().await {
+        Ok(()) => Ok(ok(serde_json::json!({"success": true}))),
+        Err(e) => Ok(ok(serde_json::json!({"success": false, "error": e.to_string()}))),
+    }
+}
+
+#[derive(Serialize)]
+struct UploadResult {
+    filename: String,
+    size: usize,
+}
+
+async fn sync_upload() -> Result<Json<ApiResponse<UploadResult>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let cfg = crate::sync::config::load_config(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    let bytes = crate::backup::export::export_bundle(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    let size = bytes.len();
+    let filename = format!(
+        "ai-proxy-backup-{}.json",
+        chrono::Utc::now().format("%Y-%m-%dT%H-%M-%SZ")
+    );
+    let client = crate::sync::webdav::WebDavClient::from_config(&cfg)
+        .map_err(|e| err_json(e.to_string()))?;
+    client.upload(&filename, &bytes).await.map_err(|e| err_json(e.to_string()))?;
+    crate::sync::config::update_sync_status(pool, "success", "")
+        .await.map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(UploadResult { filename, size }))
+}
+
+async fn sync_versions() -> Result<Json<ApiResponse<Vec<crate::sync::webdav::RemoteBackup>>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let cfg = crate::sync::config::load_config(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    let client = crate::sync::webdav::WebDavClient::from_config(&cfg)
+        .map_err(|e| err_json(e.to_string()))?;
+    let versions = client.list_versions().await.map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(versions))
+}
+
+#[derive(Deserialize)]
+struct SyncRestoreBody {
+    filename: String,
+    passphrase: Option<String>,
+}
+
+async fn sync_restore(
+    axum::Json(body): axum::Json<SyncRestoreBody>,
+) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let cfg = crate::sync::config::load_config(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    let client = crate::sync::webdav::WebDavClient::from_config(&cfg)
+        .map_err(|e| err_json(e.to_string()))?;
+    let bytes = client.download(&body.filename).await.map_err(|e| err_json(e.to_string()))?;
+    let _guard = crate::backup::backup_lock().lock().await;
+    crate::backup::import::import_bundle(pool, &bytes, body.passphrase.as_deref())
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(()))
+}
+
+#[derive(Deserialize)]
+struct DeleteVersionBody {
+    filename: String,
+}
+
+async fn delete_sync_version(
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let cfg = crate::sync::config::load_config(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    let client = crate::sync::webdav::WebDavClient::from_config(&cfg)
+        .map_err(|e| err_json(e.to_string()))?;
+    client.delete(&filename).await.map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(()))
+}
+
+#[derive(Serialize)]
+struct SyncLastStatus {
+    last_upload_at: String,
+    last_upload_status: String,
+    last_error: String,
+}
+
+async fn sync_last_status() -> Result<Json<ApiResponse<SyncLastStatus>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, value FROM settings WHERE key IN ('sync_last_upload_at','sync_last_upload_status','sync_last_error')")
+            .fetch_all(pool).await.map_err(|e| err_json(e.to_string()))?;
+    let map: HashMap<String, String> = rows.into_iter().collect();
+    Ok(ok(SyncLastStatus {
+        last_upload_at: map.get("sync_last_upload_at").cloned().unwrap_or_default(),
+        last_upload_status: map.get("sync_last_upload_status").cloned().unwrap_or_default(),
+        last_error: map.get("sync_last_error").cloned().unwrap_or_default(),
+    }))
+}
+
 // --- Route registration ---
 
 pub fn api_routes() -> axum::Router {
@@ -1437,7 +1697,19 @@ pub fn api_routes() -> axum::Router {
         .route(
             "/virtual-models/real-models",
             axum::routing::get(crate::virtual_model::api::list_real_models),
-        );
+        )
+        // Backup & sync
+        .route("/backup/status", axum::routing::get(backup_status))
+        .route("/backup/passphrase", axum::routing::put(set_passphrase))
+        .route("/backup/export", axum::routing::post(export_backup))
+        .route("/backup/import", axum::routing::post(import_backup))
+        .route("/sync/config", axum::routing::get(get_sync_config).put(update_sync_config))
+        .route("/sync/test", axum::routing::post(test_sync_connection))
+        .route("/sync/upload", axum::routing::post(sync_upload))
+        .route("/sync/versions", axum::routing::get(sync_versions))
+        .route("/sync/restore", axum::routing::post(sync_restore))
+        .route("/sync/versions/:filename", axum::routing::delete(delete_sync_version))
+        .route("/sync/last", axum::routing::get(sync_last_status));
 
     // Desktop mode: app launcher routes
     #[cfg(feature = "desktop")]
