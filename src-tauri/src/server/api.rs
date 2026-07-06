@@ -1542,6 +1542,7 @@ struct UploadResult {
 
 async fn sync_upload() -> Result<Json<ApiResponse<UploadResult>>, Json<ApiError>> {
     let pool = get_pool().await;
+    let _guard = crate::backup::backup_lock().lock().await;
     let cfg = crate::sync::config::load_config(pool)
         .await
         .map_err(|e| err_json(e.to_string()))?;
@@ -1593,11 +1594,6 @@ async fn sync_restore(
         .await
         .map_err(|e| err_json(e.to_string()))?;
     Ok(ok(()))
-}
-
-#[derive(Deserialize)]
-struct DeleteVersionBody {
-    filename: String,
 }
 
 async fn delete_sync_version(
