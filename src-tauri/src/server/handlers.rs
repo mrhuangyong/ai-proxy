@@ -33,6 +33,18 @@ use crate::interceptor::engine::InterceptorEngine;
 use crate::key::rotation::{KeyRotation, RotationStrategy};
 use crate::key::store::decrypt_api_key;
 use crate::logging::store::log_request;
+use crate::virtual_model::manager::VirtualRouter;
+
+/// Failover accounting context. When present on a proxy call, the streaming
+/// response lifecycle (success / interruption / SSE error) is recorded against
+/// `mapping_id` so the virtual-model failure counter and automatic switching
+/// actually trigger — even when the failure happens mid-stream, after the HTTP
+/// 200 status has already been sent.
+#[derive(Clone)]
+pub(crate) struct FailoverContext {
+    pub mapping_id: String,
+    pub threshold: u32,
+}
 
 #[allow(dead_code)]
 fn parse_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
@@ -242,6 +254,7 @@ pub(crate) async fn handle_proxy(
         force_stream,
         None,
         endpoint_override,
+        None,
     )
     .await
 }
@@ -253,6 +266,7 @@ pub(crate) async fn handle_proxy_inner(
     force_stream: bool,
     pre_resolved: Option<ResolvedRoute>,
     endpoint_override: Option<&str>,
+    failover_ctx: Option<FailoverContext>,
 ) -> Response {
     let start = std::time::Instant::now();
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -792,8 +806,18 @@ pub(crate) async fn handle_proxy_inner(
     let http_client = crate::http::SHARED_HTTP_CLIENT.clone();
 
     // Load retry config from DB
-    let retry_config =
+    let mut retry_config =
         crate::server::retry_session::load_config_from_db(client_format.clone()).await;
+
+    // When running under the /failover path, collapse the inner retry loop so
+    // that connection-level failures (bad host, refused TCP, etc.) surface
+    // quickly to run_failover, which has its own mapping-level failover loop.
+    // Otherwise a wrong base_url burns the full inner budget (10 attempts /
+    // 600s) before run_failover ever sees a failure to switch on.
+    if failover_ctx.is_some() {
+        retry_config.max_attempts = 1;
+        retry_config.total_timeout = std::time::Duration::from_secs(30);
+    }
 
     // Build a request factory that re-injects the right auth header per attempt.
     let url_clone = url.clone();
@@ -802,6 +826,8 @@ pub(crate) async fn handle_proxy_inner(
     let target_format_clone = route.target_format.clone();
     let http_client_clone = http_client.clone();
     let is_stream_for_timeout = ir_request.stream;
+    // Failover path: cap per-request timeout so a dead upstream surfaces fast.
+    let is_failover = failover_ctx.is_some();
 
     // Decrypt all available keys for rotation
     let mut decrypted_keys: Vec<String> = Vec::new();
@@ -837,9 +863,23 @@ pub(crate) async fn handle_proxy_inner(
                 .json(&body)
                 .header("Content-Type", "application/json");
             if is_stream_for_timeout {
-                b = b.timeout(std::time::Duration::from_secs(86400));
+                // Under the /failover path, cap per-request connect/read timeout
+                // so a dead upstream surfaces quickly (run_failover handles
+                // mapping-level retry). Otherwise a wrong base_url hangs the
+                // single send() for the full 86400s stream timeout.
+                let per_req_timeout = if is_failover {
+                    std::time::Duration::from_secs(30)
+                } else {
+                    std::time::Duration::from_secs(86400)
+                };
+                b = b.timeout(per_req_timeout);
             } else {
-                b = b.timeout(std::time::Duration::from_secs(7200));
+                let per_req_timeout = if is_failover {
+                    std::time::Duration::from_secs(30)
+                } else {
+                    std::time::Duration::from_secs(7200)
+                };
+                b = b.timeout(per_req_timeout);
             }
             match fmt {
                 ClientFormat::Anthropic => {
@@ -1290,6 +1330,8 @@ pub(crate) async fn handle_proxy_inner(
             upstream_retry_count: retry_count_for_log as i64,
             upstream_last_error: last_error_for_log.clone(),
             client_user_agent: client_user_agent.clone(),
+            failover_mapping_id: failover_ctx.as_ref().map(|c| c.mapping_id.clone()),
+            failover_threshold: failover_ctx.as_ref().map(|c| c.threshold).unwrap_or(0),
         });
         let stream_state_ref = stream_state.clone();
 
@@ -1416,6 +1458,19 @@ pub(crate) async fn handle_proxy_inner(
                             continue;
                         }
                     };
+
+                    // Detect upstream-reported SSE error events (e.g. Anthropic
+                    // `event: error`, OpenAI `data: {"error":...}`). These mean
+                    // the upstream model failed mid-stream — mark interrupted so
+                    // the failover counter increments when the stream ends.
+                    if ir_chunk.error.is_some() {
+                        warn!(
+                            "[failover] upstream SSE error event: {:?}, marking stream interrupted",
+                            ir_chunk.error
+                        );
+                        stream_state_ref.interrupted.store(true, Ordering::SeqCst);
+                        break;
+                    }
 
                     if let Some(usage) = &ir_chunk.usage {
                         // Upstream APIs report cumulative (not incremental) usage:
@@ -2185,6 +2240,11 @@ struct StreamLogState {
     upstream_last_error: Option<String>,
     /// Downstream (client) User-Agent, captured at request entry for logging.
     client_user_agent: Option<String>,
+    /// When Some, record success/failure against this virtual-model mapping
+    /// when the stream ends. Populated from `FailoverContext` on the
+    /// `/failover/...` path so mid-stream failures are counted.
+    failover_mapping_id: Option<String>,
+    failover_threshold: u32,
 }
 
 struct StreamLoggingGuard {
@@ -2258,6 +2318,29 @@ impl Drop for StreamLoggingGuard {
                     pt,
                     ct
                 );
+            }
+
+            // Failover accounting: record success/failure against the virtual
+            // model mapping when this call was made via the /failover path.
+            // This catches mid-stream failures (connection drop, idle timeout,
+            // upstream SSE error) that the synchronous status check in
+            // run_failover cannot see.
+            if let Some(ref mid) = state.failover_mapping_id {
+                let mid = mid.clone();
+                let thr = state.failover_threshold;
+                if interrupted {
+                    tokio::spawn(async move {
+                        let became_unavail = VirtualRouter::record_failure(&mid, thr).await;
+                        tracing::warn!(
+                            "[failover] mid-stream failure recorded mapping={} became_unavail={}",
+                            mid, became_unavail
+                        );
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        VirtualRouter::record_success(&mid).await;
+                    });
+                }
             }
         });
     }

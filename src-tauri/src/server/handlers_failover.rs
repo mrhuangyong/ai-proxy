@@ -213,7 +213,7 @@ async fn run_failover(
             });
         }
 
-        let resolved = match VirtualRouter::resolve(&virtual_name).await {
+        let resolved = match VirtualRouter::resolve_excluding(&virtual_name, &excluded).await {
             Ok(r) => r,
             Err(e) => {
                 if let Some(resp) = last_response.take() {
@@ -223,15 +223,8 @@ async fn run_failover(
             }
         };
 
-        if excluded.iter().any(|m| m == &resolved.mapping_id) && attempts > 0 {
-            return last_response.unwrap_or_else(|| {
-                ProxyError::Routing(format!(
-                    "no healthy mapping left for virtual model '{}'",
-                    virtual_name
-                ))
-                .into_response()
-            });
-        }
+        // No longer needed: resolve_excluding already skips excluded ids, so if
+        // it returns a mapping we know it's a fresh candidate.
 
         // Pass the ORIGINAL body (with virtual model name) unchanged.
         // handle_proxy_inner will:
@@ -266,6 +259,10 @@ async fn run_failover(
             force_stream,
             Some(resolved.route.clone()),
             endpoint_override,
+            Some(handlers::FailoverContext {
+                mapping_id: resolved.mapping_id.clone(),
+                threshold,
+            }),
         )
         .await;
 
@@ -276,13 +273,90 @@ async fn run_failover(
 
         if !is_failure {
             if status.is_success() {
-                VirtualRouter::record_success(&resolved.mapping_id).await;
+                // Determine whether this is a streaming response.
+                let is_stream = response
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|c| c.contains("text/event-stream"))
+                    .unwrap_or(false);
+
+                // Non-stream 200 whose body looks like an error (e.g. upstream
+                // returns HTTP 200 with {"error":...} for an internal failure,
+                // or "stream ended before any business chunk" surfaced via
+                // SessionOutcome::Exhausted). Treat it as a failure so failover
+                // can kick in instead of passing the error through to the client.
+                if !is_stream {
+                    let bytes = match axum::body::to_bytes(
+                        response.into_body(),
+                        64 * 1024,
+                    ).await {
+                        Ok(b) => b,
+                        Err(_) => {
+                            // Can't read body — treat as failure to be safe.
+                            let became_unavail = VirtualRouter::record_failure(
+                                &resolved.mapping_id, threshold,
+                            ).await;
+                            warn!(
+                                "[failover] virtual={} mapping={} body-unreadable became_unavail={}",
+                                virtual_name, resolved.mapping_id, became_unavail
+                            );
+                            excluded.push(resolved.mapping_id.clone());
+                            last_response = Some(
+                                ProxyError::Provider("unreadable response body".into())
+                                    .into_response(),
+                            );
+                            attempts += 1;
+                            continue;
+                        }
+                    };
+                    let body_str = String::from_utf8_lossy(&bytes);
+                    let looks_like_error = body_str.contains("\"error\"")
+                        || body_str.contains("\"type\":\"upstream_error\"")
+                        || body_str.contains("upstream failed after");
+                    if looks_like_error {
+                        let became_unavail = VirtualRouter::record_failure(
+                            &resolved.mapping_id,
+                            threshold,
+                        )
+                        .await;
+                        warn!(
+                            "[failover] virtual={} mapping={} 200-but-error body, became_unavail={}: {}",
+                            virtual_name,
+                            resolved.mapping_id,
+                            became_unavail,
+                            body_str.chars().take(200).collect::<String>()
+                        );
+                        excluded.push(resolved.mapping_id.clone());
+                        // Reconstruct the response so the last attempt's body
+                        // is preserved for the client if all mappings fail.
+                        let mut resp = axum::body::Body::from(bytes).into_response();
+                        *resp.status_mut() = axum::http::StatusCode::BAD_GATEWAY;
+                        last_response = Some(resp);
+                        attempts += 1;
+                        continue;
+                    }
+                    // Genuine non-stream success.
+                    VirtualRouter::record_success(&resolved.mapping_id).await;
+                    info!(
+                        "[failover] virtual={} ok via mapping={} after {} tries, {}ms",
+                        virtual_name,
+                        resolved.mapping_id,
+                        attempts + 1,
+                        start.elapsed().as_millis(),
+                    );
+                    // Reconstruct response from the bytes we consumed.
+                    let mut resp = axum::body::Body::from(bytes).into_response();
+                    *resp.status_mut() = status;
+                    return resp;
+                }
+                // Streaming success: accounting deferred to guard drop.
                 info!(
-                    "[failover] virtual={} ok via mapping={} after {} tries, {}ms",
+                    "[failover] virtual={} ok via mapping={} after {} tries, {}ms (stream)",
                     virtual_name,
                     resolved.mapping_id,
                     attempts + 1,
-                    start.elapsed().as_millis()
+                    start.elapsed().as_millis(),
                 );
             }
             return response;
