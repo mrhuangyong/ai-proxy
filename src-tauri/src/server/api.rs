@@ -81,6 +81,10 @@ struct CreateProviderBody {
 
 #[derive(Deserialize)]
 struct ModelInput {
+    /// Provider-model row id. Present when editing an existing provider's
+    /// models so we can UPDATE in place and preserve the row id (which
+    /// `virtual_model_mappings` references via FK).
+    id: Option<String>,
     model_name: String,
     target_model: Option<String>,
     context_window: Option<i64>,
@@ -156,18 +160,7 @@ async fn update_provider(
         .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
 
     if let Some(models) = body.models {
-        sqlx::query("DELETE FROM provider_models WHERE provider_id = ?")
-            .bind(&id)
-            .execute(pool)
-            .await
-            .map_err(|e| err_json(e.to_string()))?;
-
-        for m in &models {
-            let model_id = uuid::Uuid::new_v4().to_string();
-            sqlx::query("INSERT INTO provider_models (id, provider_id, model_name, target_model, context_window) VALUES (?, ?, ?, ?, ?)")
-                .bind(&model_id).bind(&id).bind(&m.model_name).bind(&m.target_model).bind(m.context_window.unwrap_or(272000i64))
-                .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
-        }
+        update_provider_models(pool, &id, &models).await?;
     }
 
     if let Some(ref plaintext_key) = body.api_key {
@@ -188,6 +181,93 @@ async fn update_provider(
     }
 
     Ok(ok(()))
+}
+
+/// Diff/upsert a provider's models while preserving existing row ids.
+///
+/// `virtual_model_mappings.provider_model_id` references `provider_models.id`
+/// with `ON DELETE CASCADE`, so we must NOT delete+re-insert rows that are
+/// merely being edited — that would wipe their failover mappings. Instead we
+/// UPDATE matched rows in place, INSERT genuinely new rows, and only DELETE
+/// rows the user actually removed.
+async fn update_provider_models(
+    pool: &sqlx::SqlitePool,
+    provider_id: &str,
+    models: &[ModelInput],
+) -> Result<(), Json<ApiError>> {
+    use std::collections::HashSet;
+
+    // Snapshot existing rows (id, model_name) for this provider.
+    let existing: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, model_name FROM provider_models WHERE provider_id = ?")
+            .bind(provider_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| err_json(e.to_string()))?;
+
+    // Validate that any incoming `id` actually belongs to this provider;
+    // a foreign id is ignored (treated as a new row) to avoid cross-provider
+    // row hijacking.
+    let own_ids: HashSet<&str> = existing.iter().map(|(id, _)| id.as_str()).collect();
+
+    // Track which existing rows the client still references; anything not
+    // touched here gets deleted below.
+    let mut seen_ids: HashSet<&str> = HashSet::new();
+
+    for m in models {
+        // Only honour `id` when it belongs to this provider.
+        if let Some(ref mid) = m.id {
+            if own_ids.contains(mid.as_str()) {
+                seen_ids.insert(mid.as_str());
+                sqlx::query(
+                    "UPDATE provider_models SET model_name = ?, target_model = ?, context_window = ? WHERE id = ? AND provider_id = ?",
+                )
+                .bind(&m.model_name)
+                .bind(&m.target_model)
+                .bind(m.context_window.unwrap_or(272000i64))
+                .bind(mid)
+                .bind(provider_id)
+                .execute(pool)
+                .await
+                .map_err(|e| err_json(e.to_string()))?;
+                continue;
+            }
+        }
+
+        // New row. Use ON CONFLICT(provider_id, model_name) so a duplicate
+        // model_name (e.g. client omitted id for an existing row) becomes an
+        // in-place UPDATE instead of a constraint error.
+        let new_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO provider_models (id, provider_id, model_name, target_model, context_window) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(provider_id, model_name) DO UPDATE SET \
+               target_model = excluded.target_model, \
+               context_window = excluded.context_window",
+        )
+        .bind(&new_id)
+        .bind(provider_id)
+        .bind(&m.model_name)
+        .bind(&m.target_model)
+        .bind(m.context_window.unwrap_or(272000i64))
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    }
+
+    // Delete rows the user removed. Mappings referencing them are cleaned up
+    // by the existing ON DELETE CASCADE — that's the intended behaviour.
+    let to_delete: Vec<&str> = own_ids.difference(&seen_ids).copied().collect();
+    for did in to_delete {
+        sqlx::query("DELETE FROM provider_models WHERE id = ? AND provider_id = ?")
+            .bind(did)
+            .bind(provider_id)
+            .execute(pool)
+            .await
+            .map_err(|e| err_json(e.to_string()))?;
+    }
+
+    Ok(())
 }
 
 async fn delete_provider(Path(id): Path<String>) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {

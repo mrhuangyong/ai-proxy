@@ -63,11 +63,31 @@ impl VirtualRouter {
     /// Resolve a virtual model name into a concrete upstream route.
     /// Honours the sticky `current_mapping_id` if it is still enabled & available.
     pub async fn resolve(virtual_name: &str) -> Result<ResolvedFailover, ProxyError> {
+        Self::resolve_excluding(virtual_name, &[]).await
+    }
+
+    /// Like [`resolve`], but skips the given mapping ids. Used by run_failover's
+    /// in-request loop so that after a mapping fails it can immediately try the
+    /// next candidate within the same request instead of re-selecting the same
+    /// sticky mapping and bailing out.
+    pub async fn resolve_excluding(
+        virtual_name: &str,
+        exclude: &[String],
+    ) -> Result<ResolvedFailover, ProxyError> {
         let pool = get_pool().await;
+
+        // Build an `NOT IN (...)` clause for excluded mapping ids, if any.
+        // SQLite parameter binding for IN/NOT IN requires one ? per value.
+        let exclude_clause = if exclude.is_empty() {
+            String::new()
+        } else {
+            let placeholders = (0..exclude.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+            format!("AND m.id NOT IN ({})", placeholders)
+        };
 
         // Candidate rows; sticky one sorts first via `sticky` DESC, then by
         // priority ASC, failover_count ASC, created_at ASC.
-        let candidates: Vec<DbResolvableCandidate> = sqlx::query_as(
+        let sql = format!(
             "SELECT
                 m.id AS mapping_id,
                 m.provider_id,
@@ -89,13 +109,20 @@ impl VirtualRouter {
                AND m.available = 1
                AND p.enabled = 1
                AND pm.enabled = 1
+               {exclude_clause}
              ORDER BY sticky DESC, m.priority ASC, m.failover_count ASC, m.created_at ASC
-             LIMIT 1",
-        )
-        .bind(virtual_name)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| ProxyError::Database(e))?;
+             LIMIT 1"
+        );
+
+        let mut q = sqlx::query_as::<_, DbResolvableCandidate>(&sql).bind(virtual_name);
+        for eid in exclude {
+            q = q.bind(eid);
+        }
+
+        let candidates: Vec<DbResolvableCandidate> = q
+            .fetch_all(pool)
+            .await
+            .map_err(|e| ProxyError::Database(e))?;
 
         let c = candidates.into_iter().next().ok_or_else(|| {
             ProxyError::Routing(format!(
