@@ -1,4 +1,5 @@
 use ai_proxy_lib::backup::export::export_bundle_with_passphrase;
+use ai_proxy_lib::backup::import::import_bundle;
 use sqlx::{Row, SqlitePool};
 
 /// Run the full migration chain (001..025) so the schema matches production.
@@ -305,4 +306,54 @@ async fn test_export_produces_valid_bundle() {
     // api_keys should have re-encrypted encrypted_key (base64 string, non-empty).
     assert!(v["data"]["api_keys"][0]["encrypted_key"].is_string());
     assert_ne!(v["data"]["api_keys"][0]["encrypted_key"], "");
+}
+
+#[tokio::test]
+async fn test_export_then_import_roundtrip() {
+    let pool = setup_pool().await;
+    let bytes = export_bundle_with_passphrase(&pool, "pw123").await.unwrap();
+    // Wipe tables
+    sqlx::query("DELETE FROM providers")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM api_keys")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM settings")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Import
+    import_bundle(&pool, &bytes, Some("pw123")).await.unwrap();
+    // Verify provider restored
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM providers")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count.0, 1);
+    // Verify api_key decrypts correctly via the key store
+    let row: (Vec<u8>, Vec<u8>) =
+        sqlx::query_as("SELECT encrypted_key, nonce FROM api_keys WHERE id='k1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let nonce_arr: [u8; 12] = row.1.as_slice().try_into().unwrap();
+    let plain = ai_proxy_lib::key::store::decrypt_api_key(&row.0, &nonce_arr).unwrap();
+    assert_eq!(plain, "sk-test");
+}
+
+#[tokio::test]
+async fn test_import_wrong_passphrase_does_not_mutate() {
+    let pool = setup_pool().await;
+    let bytes = export_bundle_with_passphrase(&pool, "right").await.unwrap();
+    let result = import_bundle(&pool, &bytes, Some("WRONG")).await;
+    assert!(result.is_err());
+    // DB must be untouched: provider still present
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM providers")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count.0, 1);
 }
