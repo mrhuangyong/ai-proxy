@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod converter;
 pub mod db;
 pub mod error;
