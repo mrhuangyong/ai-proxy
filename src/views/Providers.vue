@@ -245,7 +245,12 @@ const form = ref({
   endpoint_path: '',
   upstream_user_agent: '',
   api_key: '',
-  models: [] as Array<{ model_name: string; context_window: number | null }>,
+  models: [] as Array<{
+    id?: string
+    model_name: string
+    target_model?: string | null
+    context_window: number | null
+  }>,
 })
 
 const formatOptions = [
@@ -298,7 +303,9 @@ function openEditModal(row: Provider) {
     upstream_user_agent: row.upstream_user_agent || '',
     api_key: '',
     models: row.models.map((m) => ({
+      id: m.id,
       model_name: m.model_name,
+      target_model: m.target_model ?? null,
       context_window: m.context_window ?? null,
     })),
   }
@@ -358,8 +365,9 @@ async function handleSubmit() {
         endpoint_path: form.value.endpoint_path || null,
         upstream_user_agent: form.value.upstream_user_agent || '',
         models: form.value.models.map((m) => ({
+          id: m.id,
           model_name: m.model_name,
-          target_model: null,
+          target_model: m.target_model ?? null,
           context_window: m.context_window,
         })),
       }
