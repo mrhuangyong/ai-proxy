@@ -305,6 +305,7 @@ pub fn run() {
                 }
 
                 start_proxy();
+                crate::sync::scheduler::start_scheduler();
                 update_timer::start_update_timer(app.handle().clone());
 
                 let check_update_item = MenuItem::with_id(
