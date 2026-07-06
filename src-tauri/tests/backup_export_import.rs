@@ -27,8 +27,7 @@ async fn apply_all_migrations(pool: &SqlitePool) {
     }
 
     // 003: add providers.format (guarded — ADD COLUMN is not re-runnable).
-    let has_format: bool =
-        pragma_has_column(pool, "providers", "format").await;
+    let has_format: bool = pragma_has_column(pool, "providers", "format").await;
     if !has_format {
         sqlx::query(include_str!("../migrations/003_simplify_routing.sql"))
             .execute(pool)
@@ -38,8 +37,7 @@ async fn apply_all_migrations(pool: &SqlitePool) {
 
     // 004: drop auth_type/auth_header — NO-OP on fresh installs (columns never
     // created by the current 001). Guard exactly like init.rs.
-    let has_auth_type: bool =
-        pragma_has_column(pool, "providers", "auth_type").await;
+    let has_auth_type: bool = pragma_has_column(pool, "providers", "auth_type").await;
     if has_auth_type {
         sqlx::query(include_str!("../migrations/004_drop_auth_columns.sql"))
             .execute(pool)
@@ -195,10 +193,12 @@ async fn apply_all_migrations(pool: &SqlitePool) {
 
     // 022: upstream_user_agent setting (guarded).
     if !has_setting(pool, "upstream_user_agent").await {
-        sqlx::query(include_str!("../migrations/022_add_upstream_user_agent.sql"))
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(include_str!(
+            "../migrations/022_add_upstream_user_agent.sql"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     // 023: providers.upstream_user_agent (guarded).

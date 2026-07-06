@@ -35,11 +35,10 @@ async fn tick_once() -> Result<(), SyncError> {
 
 async fn should_sync_now(pool: &sqlx::SqlitePool, interval_min: u32) -> Result<bool, SyncError> {
     // sync_dirty forces an immediate sync regardless of interval.
-    let dirty: (String,) =
-        sqlx::query_as("SELECT value FROM settings WHERE key = 'sync_dirty'")
-            .fetch_optional(pool)
-            .await?
-            .unwrap_or(("false".into(),));
+    let dirty: (String,) = sqlx::query_as("SELECT value FROM settings WHERE key = 'sync_dirty'")
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(("false".into(),));
     if dirty.0 == "true" {
         sqlx::query("UPDATE settings SET value = 'false', updated_at = datetime('now') WHERE key = 'sync_dirty'")
             .execute(pool).await?;
@@ -54,13 +53,18 @@ async fn should_sync_now(pool: &sqlx::SqlitePool, interval_min: u32) -> Result<b
         return Ok(true);
     }
     match chrono::DateTime::parse_from_rfc3339(&last.0) {
-        Ok(t) => Ok(Utc::now().signed_duration_since(t.with_timezone(&Utc).fixed_offset()).num_minutes()
+        Ok(t) => Ok(Utc::now()
+            .signed_duration_since(t.with_timezone(&Utc).fixed_offset())
+            .num_minutes()
             >= interval_min as i64),
         Err(_) => Ok(true),
     }
 }
 
-pub async fn run_upload(pool: &sqlx::SqlitePool, cfg: &super::config::SyncConfig) -> Result<(), SyncError> {
+pub async fn run_upload(
+    pool: &sqlx::SqlitePool,
+    cfg: &super::config::SyncConfig,
+) -> Result<(), SyncError> {
     let client = WebDavClient::from_config(cfg)?;
     let bytes = export_bundle(pool).await?;
     let filename = format!(

@@ -85,7 +85,10 @@ async fn insert_row(
     let sql = format!(
         "INSERT INTO {} ({}) VALUES ({})",
         table,
-        cols.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(","),
+        cols.iter()
+            .map(|c| c.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
         placeholders.join(",")
     );
     let mut q = sqlx::query(&sql);

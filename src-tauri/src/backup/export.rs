@@ -155,8 +155,8 @@ fn encrypt_api_keys(rows: &mut [serde_json::Value], key: &[u8; 32]) -> BackupRes
             .map_err(|_| BackupError::InvalidFormat)?;
 
         // Decrypt with machine master key → plaintext key
-        let plaintext =
-            decrypt_api_key(&enc_blob, &nonce_arr).map_err(|e| BackupError::Other(e.to_string()))?;
+        let plaintext = decrypt_api_key(&enc_blob, &nonce_arr)
+            .map_err(|e| BackupError::Other(e.to_string()))?;
         // Re-encrypt with passphrase key
         let (new_ct, new_nonce) = passphrase_encrypt(plaintext.as_bytes(), key)?;
 

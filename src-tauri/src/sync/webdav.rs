@@ -36,7 +36,10 @@ impl WebDavClient {
     pub async fn test_connection(&self) -> SyncResult<()> {
         let resp = self
             .client
-            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &self.base_url)
+            .request(
+                reqwest::Method::from_bytes(b"PROPFIND").unwrap(),
+                &self.base_url,
+            )
             .header("Authorization", &self.auth_header)
             .header("Depth", "0")
             .send()
@@ -236,14 +239,26 @@ mod tests {
         let backups = parse_propfind(xml).unwrap();
         assert_eq!(backups.len(), 2);
         // Sorted descending by filename
-        assert_eq!(backups[0].filename, "ai-proxy-backup-2026-07-06T10-30-00Z.json");
-        assert_eq!(backups[1].filename, "ai-proxy-backup-2026-07-05T09-00-00Z.json");
+        assert_eq!(
+            backups[0].filename,
+            "ai-proxy-backup-2026-07-06T10-30-00Z.json"
+        );
+        assert_eq!(
+            backups[1].filename,
+            "ai-proxy-backup-2026-07-05T09-00-00Z.json"
+        );
         assert_eq!(backups[0].size, 45230);
     }
 
     #[test]
     fn test_join_url() {
-        assert_eq!(join_url("https://dav.example.com/dav", "backups/"), "https://dav.example.com/dav/backups/");
-        assert_eq!(join_url("https://dav.example.com/dav/", ""), "https://dav.example.com/dav/");
+        assert_eq!(
+            join_url("https://dav.example.com/dav", "backups/"),
+            "https://dav.example.com/dav/backups/"
+        );
+        assert_eq!(
+            join_url("https://dav.example.com/dav/", ""),
+            "https://dav.example.com/dav/"
+        );
     }
 }

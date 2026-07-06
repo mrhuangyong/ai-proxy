@@ -1,6 +1,5 @@
 pub mod backup;
 pub mod converter;
-pub mod sync;
 pub mod db;
 pub mod error;
 pub mod http;
@@ -12,6 +11,7 @@ pub mod provider;
 pub mod routing;
 pub mod server;
 pub mod skill;
+pub mod sync;
 pub mod usage;
 pub mod virtual_model;
 
@@ -272,6 +272,7 @@ pub fn run() {
                 None,
             ))
             .plugin(tauri_plugin_window_state::Builder::new().build())
+            .plugin(tauri_plugin_fs::init())
             .setup(|app| {
                 let base_data_dir = app
                     .path()
