@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod converter;
+pub mod sync;
 pub mod db;
 pub mod error;
 pub mod http;
