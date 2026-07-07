@@ -1,5 +1,8 @@
 <template>
-  <n-space vertical size="large">
+  <n-tabs type="line" animated size="large">
+    <!-- 通用 -->
+    <n-tab-pane name="general" tab="通用">
+      <n-space vertical size="large">
     <n-card title="通用设置">
       <n-form label-placement="left" label-width="140" style="max-width: 520px">
         <n-form-item label="外观主题">
@@ -129,39 +132,12 @@
         </n-form-item>
       </n-form>
     </n-card>
-
-    <n-card v-if="isTauri" title="检查更新">
-      <n-form label-placement="left" label-width="140" style="max-width: 520px">
-        <n-form-item label="当前版本">
-          <n-text>{{ currentVersion }}</n-text>
-        </n-form-item>
-        <n-form-item>
-          <n-button
-            type="primary"
-            :loading="checkingUpdate"
-            @click="handleCheckUpdate"
-          >
-            检查更新
-          </n-button>
-        </n-form-item>
-      </n-form>
-    </n-card>
-
-    <n-card v-if="isTauri" class="danger-zone">
-      <template #header>
-        <n-space align="center">
-          <n-text strong style="color: var(--error)">危险操作</n-text>
-          <n-tag type="error" size="small">谨慎操作</n-tag>
-        </n-space>
-      </template>
-      <n-space vertical>
-        <n-text>清除所有数据将删除所有供应商配置、API Key、请求日志等，应用将自动重启。</n-text>
-        <n-button type="error" @click="handleResetAll">
-          清除所有数据
-        </n-button>
       </n-space>
-    </n-card>
+    </n-tab-pane>
 
+    <!-- 数据与同步 -->
+    <n-tab-pane name="data" tab="数据与同步">
+      <n-space vertical size="large">
     <!-- 备份与恢复 -->
     <n-card title="备份与恢复">
       <n-space vertical>
@@ -254,6 +230,46 @@
         </n-collapse-transition>
       </n-space>
     </n-card>
+      </n-space>
+    </n-tab-pane>
+
+    <!-- 关于 -->
+    <n-tab-pane name="about" tab="关于">
+      <n-space vertical size="large">
+    <n-card v-if="isTauri" title="检查更新">
+      <n-form label-placement="left" label-width="140" style="max-width: 520px">
+        <n-form-item label="当前版本">
+          <n-text>{{ currentVersion }}</n-text>
+        </n-form-item>
+        <n-form-item>
+          <n-button
+            type="primary"
+            :loading="checkingUpdate"
+            @click="handleCheckUpdate"
+          >
+            检查更新
+          </n-button>
+        </n-form-item>
+      </n-form>
+    </n-card>
+
+    <n-card v-if="isTauri" class="danger-zone">
+      <template #header>
+        <n-space align="center">
+          <n-text strong style="color: var(--error)">危险操作</n-text>
+          <n-tag type="error" size="small">谨慎操作</n-tag>
+        </n-space>
+      </template>
+      <n-space vertical>
+        <n-text>清除所有数据将删除所有供应商配置、API Key、请求日志等，应用将自动重启。</n-text>
+        <n-button type="error" @click="handleResetAll">
+          清除所有数据
+        </n-button>
+      </n-space>
+    </n-card>
+      </n-space>
+    </n-tab-pane>
+  </n-tabs>
 
     <!-- 口令设置弹窗 -->
     <n-modal v-model:show="showPassphraseModal" preset="dialog" title="设置备份口令">
