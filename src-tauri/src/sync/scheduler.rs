@@ -9,8 +9,12 @@ use crate::backup::export::export_bundle;
 use crate::db::get_pool;
 
 /// Spawn the background auto-sync scheduler. Call once at startup.
-pub fn start_scheduler() {
-    tokio::spawn(async move {
+///
+/// Takes a runtime handle because the desktop (Tauri) setup closure runs
+/// outside any thread-local Tokio reactor — `tokio::spawn` would panic there.
+/// The server binary runs under `#[tokio::main]` and passes `Handle::current()`.
+pub fn start_scheduler(handle: tokio::runtime::Handle) {
+    handle.spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         loop {
             ticker.tick().await;
