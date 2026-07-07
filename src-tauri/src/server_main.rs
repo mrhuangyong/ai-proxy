@@ -62,6 +62,8 @@ async fn main() {
 
     ai_proxy_lib::ensure_default_admin(args.admin_password).await;
 
+    ai_proxy_lib::sync::scheduler::start_scheduler(tokio::runtime::Handle::current());
+
     // Keep the sender alive so shutdown_rx.changed() blocks until process is killed
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     ai_proxy_lib::server::start_server_with_static(

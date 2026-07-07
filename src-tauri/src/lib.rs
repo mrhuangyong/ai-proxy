@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod converter;
 pub mod db;
 pub mod error;
@@ -10,6 +11,7 @@ pub mod provider;
 pub mod routing;
 pub mod server;
 pub mod skill;
+pub mod sync;
 pub mod usage;
 pub mod virtual_model;
 
@@ -270,6 +272,7 @@ pub fn run() {
                 None,
             ))
             .plugin(tauri_plugin_window_state::Builder::new().build())
+            .plugin(tauri_plugin_fs::init())
             .setup(|app| {
                 let base_data_dir = app
                     .path()
@@ -303,6 +306,18 @@ pub fn run() {
                 }
 
                 start_proxy();
+                {
+                    // Spawn the auto-sync scheduler on the app runtime — the
+                    // Tauri setup closure has no thread-local Tokio reactor, so
+                    // we must hand the scheduler an explicit handle.
+                    let guard = APP_RUNTIME.lock().unwrap();
+                    let handle = guard
+                        .as_ref()
+                        .expect("runtime not initialized")
+                        .handle()
+                        .clone();
+                    crate::sync::scheduler::start_scheduler(handle);
+                }
                 update_timer::start_update_timer(app.handle().clone());
 
                 let check_update_item = MenuItem::with_id(

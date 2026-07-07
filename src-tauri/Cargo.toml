@@ -37,6 +37,8 @@ humantime = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
+quick-xml = "0.36"
+base64 = "0.22"
 futures = "0.3"
 async-stream = "0.3"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
@@ -54,6 +56,7 @@ tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-autostart = { version = "2", optional = true }
 tauri-plugin-window-state = { version = "2", optional = true }
+tauri-plugin-fs = { version = "2", optional = true }
 
 # Server-only dependencies (optional)
 clap = { version = "4", features = ["derive", "env"], optional = true }
@@ -73,6 +76,7 @@ desktop = [
     "tauri", "tauri-build",
     "tauri-plugin-opener", "tauri-plugin-dialog",
     "tauri-plugin-autostart", "tauri-plugin-window-state",
+    "tauri-plugin-fs",
     "objc2"
 ]
 server = ["clap", "jsonwebtoken", "bcrypt"]

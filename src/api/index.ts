@@ -183,3 +183,73 @@ export function getProxyPort(): number {
 export function isInitialized(): boolean {
   return apiState.initialized
 }
+
+// --- Backup & Sync APIs ---
+
+export interface BackupStatus {
+  passphrase_set: boolean
+}
+
+export interface ExportResult {
+  data: string // base64
+}
+
+export interface SyncConfigResponse {
+  enabled: boolean
+  webdav_url: string
+  webdav_username: string
+  webdav_path: string
+  auto_enabled: boolean
+  auto_interval_minutes: number
+  sync_on_change: boolean
+}
+
+export interface RemoteBackup {
+  filename: string
+  size: number
+  modified_at: string
+}
+
+export interface SyncLastStatus {
+  last_upload_at: string
+  last_upload_status: string
+  last_error: string
+}
+
+export const backupApi = {
+  getStatus: () => api<BackupStatus>('/api/backup/status'),
+  setPassphrase: (new_passphrase: string, old_passphrase?: string) =>
+    api('/api/backup/passphrase', {
+      method: 'PUT',
+      body: JSON.stringify({ new_passphrase, old_passphrase }),
+    }),
+  exportBackup: () => api<ExportResult>('/api/backup/export', { method: 'POST' }),
+  importBackup: (file_bytes: string, passphrase?: string) =>
+    api('/api/backup/import', {
+      method: 'POST',
+      body: JSON.stringify({ file_bytes, passphrase }),
+    }),
+}
+
+export const syncApi = {
+  getConfig: () => api<SyncConfigResponse>('/api/sync/config'),
+  saveConfig: (cfg: Partial<{
+    enabled: boolean
+    webdav_url: string
+    webdav_username: string
+    webdav_password: string
+    webdav_path: string
+    auto_enabled: boolean
+    auto_interval_minutes: number
+    sync_on_change: boolean
+  }>) =>
+    api('/api/sync/config', { method: 'PUT', body: JSON.stringify(cfg) }),
+  testConnection: () => api<{ success: boolean; error?: string }>('/api/sync/test', { method: 'POST' }),
+  upload: () => api<{ filename: string; size: number }>('/api/sync/upload', { method: 'POST' }),
+  listVersions: () => api<RemoteBackup[]>('/api/sync/versions'),
+  restore: (filename: string, passphrase?: string) =>
+    api('/api/sync/restore', { method: 'POST', body: JSON.stringify({ filename, passphrase }) }),
+  deleteVersion: (filename: string) =>
+    api(`/api/sync/versions/${encodeURIComponent(filename)}`, { method: 'DELETE' }),
+  getLast: () => api<SyncLastStatus>('/api/sync/last'),
+}
