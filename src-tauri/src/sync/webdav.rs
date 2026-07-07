@@ -11,9 +11,21 @@ pub struct RemoteBackup {
     pub modified_at: String,
 }
 
+/// Outcome of a MKCOL request, classified for branching in ensure_collection.
+enum MkcolOutcome {
+    Created,
+    AlreadyExists,
+    Conflict,
+    Unauthorized,
+    Other(u16),
+}
+
 pub struct WebDavClient {
     client: reqwest::Client,
     base_url: String,
+    /// Root WebDAV URL without the `webdav_path` suffix, trailing slash stripped.
+    /// Used by `ensure_collection` to create intermediate parent collections.
+    root_url: String,
     auth_header: String,
 }
 
@@ -23,29 +35,154 @@ impl WebDavClient {
             return Err(SyncError::NotConfigured);
         }
         let base_url = join_url(&cfg.webdav_url, &cfg.webdav_path);
+        let root_url = cfg.webdav_url.trim_end_matches('/').to_string();
         let token = B64.encode(format!("{}:{}", cfg.webdav_username, cfg.webdav_password));
         Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?,
             base_url,
+            root_url,
             auth_header: format!("Basic {}", token),
         })
     }
 
     pub async fn test_connection(&self) -> SyncResult<()> {
+        // First probe: is the base collection present?
+        let status = self.propfind_status(&self.base_url).await?;
+        if status == 404 {
+            // Collection missing — try to create it (recursively if needed).
+            // If creation fails because the root URL itself is unreachable,
+            // surface that as a connection error rather than silently no-oping.
+            self.ensure_collection().await?;
+            // Re-probe to confirm creation succeeded.
+            let again = self.propfind_status(&self.base_url).await?;
+            if again == 404 {
+                return Err(SyncError::ConnectionFailed(
+                    "远程目录创建后仍不可访问".into(),
+                ));
+            }
+            if again == 401 || again == 403 {
+                return Err(SyncError::Unauthorized);
+            }
+            if !(200..=300).contains(&again) && again != 207 {
+                return Err(SyncError::ConnectionFailed(format!("HTTP {}", again)));
+            }
+        }
+        Ok(())
+    }
+
+    /// PROPFIND depth=0 on a URL, returning the raw HTTP status code.
+    /// Used internally for existence checks where we need to branch on 404.
+    async fn propfind_status(&self, url: &str) -> SyncResult<u16> {
         let resp = self
             .client
-            .request(
-                reqwest::Method::from_bytes(b"PROPFIND").unwrap(),
-                &self.base_url,
-            )
+            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
             .header("Authorization", &self.auth_header)
             .header("Depth", "0")
             .send()
             .await?;
-        Self::map_dav_error(resp.status())?;
+        Ok(resp.status().as_u16())
+    }
+
+    /// Ensure the base_url collection exists, creating it (and any missing
+    /// parent collections along the webdav_path) via MKCOL if necessary.
+    ///
+    /// Idempotent: 201 (created) and 405 (already exists) are both treated as
+    /// success. If an intermediate parent is missing (409), collections are
+    /// created root-outward one segment at a time.
+    pub async fn ensure_collection(&self) -> SyncResult<()> {
+        // Try a single MKCOL on the full base_url first (common case: only the
+        // leaf is missing).
+        match self.mkcol(&self.base_url).await? {
+            MkcolOutcome::Created | MkcolOutcome::AlreadyExists => return Ok(()),
+            MkcolOutcome::Conflict => {
+                // A parent collection is missing — build up from the root.
+                self.ensure_collection_recursive().await
+            }
+            MkcolOutcome::Unauthorized => Err(SyncError::Unauthorized),
+            MkcolOutcome::Other(status) => Err(SyncError::ConnectionFailed(format!(
+                "MKCOL 返回 HTTP {}",
+                status
+            ))),
+        }
+    }
+
+    /// Create each path segment from root_url outward. The root_url itself is
+    /// assumed to exist (it is the user-configured WebDAV server base); if it
+    /// doesn't, the whole connection is misconfigured and we surface an error.
+    async fn ensure_collection_recursive(&self) -> SyncResult<()> {
+        // Derive the path segments between root_url and base_url.
+        // base_url = "{root_url}/{path...}/"; strip root prefix + trailing '/'.
+        let suffix = self
+            .base_url
+            .strip_prefix(&self.root_url)
+            .unwrap_or("")
+            .trim_matches('/');
+        if suffix.is_empty() {
+            // base_url == root_url; nothing intermediate to create.
+            return self.mkcol_expect_ok(&self.base_url).await;
+        }
+        // Build collection URLs segment by segment.
+        let mut acc = self.root_url.clone();
+        for segment in suffix.split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            acc.push('/');
+            acc.push_str(segment);
+            let url = format!("{}/", acc);
+            match self.mkcol(&url).await? {
+                MkcolOutcome::Created | MkcolOutcome::AlreadyExists => continue,
+                MkcolOutcome::Unauthorized => return Err(SyncError::Unauthorized),
+                MkcolOutcome::Conflict => {
+                    return Err(SyncError::ConnectionFailed(format!(
+                        "无法创建中间目录 {}（父目录缺失）",
+                        url
+                    )))
+                }
+                MkcolOutcome::Other(status) => {
+                    return Err(SyncError::ConnectionFailed(format!(
+                        "MKCOL {} 返回 HTTP {}",
+                        url, status
+                    )))
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Issue a MKCOL request. Returns the outcome classification.
+    async fn mkcol(&self, url: &str) -> SyncResult<MkcolOutcome> {
+        let resp = self
+            .client
+            .request(reqwest::Method::from_bytes(b"MKCOL").unwrap(), url)
+            .header("Authorization", &self.auth_header)
+            .send()
+            .await?;
+        Ok(match resp.status().as_u16() {
+            200 | 201 => MkcolOutcome::Created,
+            405 => MkcolOutcome::AlreadyExists,
+            409 => MkcolOutcome::Conflict,
+            401 | 403 => MkcolOutcome::Unauthorized,
+            other => MkcolOutcome::Other(other),
+        })
+    }
+
+    /// MKCOL that treats Created + AlreadyExists as Ok.
+    async fn mkcol_expect_ok(&self, url: &str) -> SyncResult<()> {
+        match self.mkcol(url).await? {
+            MkcolOutcome::Created | MkcolOutcome::AlreadyExists => Ok(()),
+            MkcolOutcome::Unauthorized => Err(SyncError::Unauthorized),
+            MkcolOutcome::Conflict => Err(SyncError::ConnectionFailed(format!(
+                "MKCOL {} 父目录缺失",
+                url
+            ))),
+            MkcolOutcome::Other(status) => Err(SyncError::ConnectionFailed(format!(
+                "MKCOL 返回 HTTP {}",
+                status
+            ))),
+        }
     }
 
     pub async fn upload(&self, filename: &str, content: &[u8]) -> SyncResult<()> {
@@ -58,7 +195,23 @@ impl WebDavClient {
             .body(content.to_vec())
             .send()
             .await?;
-        Self::map_dav_error(resp.status())?;
+        let status = resp.status();
+        // 409 Conflict usually means the parent collection is missing. Try to
+        // create it (and any intermediates) once, then retry the PUT a single time.
+        if status.as_u16() == 409 {
+            self.ensure_collection().await?;
+            let retry = self
+                .client
+                .put(&url)
+                .header("Authorization", &self.auth_header)
+                .header("Content-Type", "application/json")
+                .body(content.to_vec())
+                .send()
+                .await?;
+            Self::map_dav_error(retry.status())?;
+            return Ok(());
+        }
+        Self::map_dav_error(status)?;
         Ok(())
     }
 
@@ -72,7 +225,14 @@ impl WebDavClient {
             .body(r#"<?xml version="1.0"?><propfind xmlns="DAV:"><prop><getcontentlength/><getlastmodified/></prop></propfind>"#)
             .send()
             .await?;
-        Self::map_dav_error(resp.status())?;
+        let status = resp.status();
+        // 404 means the collection doesn't exist yet. Create it, then return an
+        // empty list (a freshly-created collection has no backups).
+        if status.as_u16() == 404 {
+            self.ensure_collection().await?;
+            return Ok(Vec::new());
+        }
+        Self::map_dav_error(status)?;
         let xml = resp.text().await?;
         parse_propfind(&xml)
     }
