@@ -314,7 +314,6 @@
     </n-modal>
 
     <UpdateNotification ref="updateNotification" />
-  </n-space>
 </template>
 
 <script setup lang="ts">
