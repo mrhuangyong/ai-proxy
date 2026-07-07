@@ -328,6 +328,19 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 024: virtual models");
     }
 
+    // Migration 025: backup & sync settings
+    let has_backup_sync_settings: bool =
+        sqlx::query_scalar("SELECT COUNT(*) > 0 FROM settings WHERE key = 'sync_webdav_url'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
+
+    if !has_backup_sync_settings {
+        let migration25 = include_str!("../../migrations/025_backup_sync_settings.sql");
+        sqlx::query(migration25).execute(pool).await?;
+        info!("Applied migration 025: backup & sync settings");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }
