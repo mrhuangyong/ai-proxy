@@ -863,16 +863,13 @@ pub(crate) async fn handle_proxy_inner(
                 .json(&body)
                 .header("Content-Type", "application/json");
             if is_stream_for_timeout {
-                // Under the /failover path, cap per-request connect/read timeout
-                // so a dead upstream surfaces quickly (run_failover handles
-                // mapping-level retry). Otherwise a wrong base_url hangs the
-                // single send() for the full 86400s stream timeout.
-                let per_req_timeout = if is_failover {
-                    std::time::Duration::from_secs(30)
-                } else {
-                    std::time::Duration::from_secs(86400)
-                };
-                b = b.timeout(per_req_timeout);
+                // 流式请求不设短超时。连接阶段已由共享客户端的
+                // connect_timeout(30s) 保障快速失败；流式 body 可能持续数分钟
+                // （长文本生成），reqwest 的 .timeout() 会附着到整个 body 生命周期，
+                // 若在此设 30s 会在传输中途截断流，产生 "error decoding response
+                // body"。failover 路径的快速切换由 run_failover 根据状态码处理，
+                // 不依赖这个超时。
+                b = b.timeout(std::time::Duration::from_secs(86400));
             } else {
                 let per_req_timeout = if is_failover {
                     std::time::Duration::from_secs(30)
