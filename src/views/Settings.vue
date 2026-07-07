@@ -310,6 +310,7 @@
             }) },
         ]"
         :data="remoteVersions"
+        :loading="versionsLoading"
         size="small"
         :bordered="false"
       />
@@ -670,9 +671,14 @@ async function uploadNow() {
   } catch (e: any) { message.error(e.message || '上传失败') }
 }
 
+const versionsLoading = ref(false)
+
 async function loadVersions() {
-  try { remoteVersions.value = await syncApi.listVersions(); showVersions.value = true }
+  showVersions.value = true
+  versionsLoading.value = true
+  try { remoteVersions.value = await syncApi.listVersions() }
   catch (e: any) { message.error(e.message || '获取版本失败') }
+  finally { versionsLoading.value = false }
 }
 
 const restoreConfirm = reactive({ show: false, filename: '', passphrase: '', agreed: false })
