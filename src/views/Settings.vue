@@ -207,27 +207,6 @@
           <n-button @click="uploadNow" :disabled="!syncCfg.enabled">立即上传</n-button>
           <n-button @click="loadVersions" :disabled="!syncCfg.enabled">管理版本</n-button>
         </n-space>
-
-        <n-collapse-transition :show="showVersions">
-          <n-data-table
-            :columns="[
-              { title: '文件名', key: 'filename' },
-              { title: '大小', key: 'size', render: (row: any) => (row.size / 1024).toFixed(1) + ' KB' },
-              { title: '修改时间', key: 'modified_at' },
-              { title: '操作', key: 'actions', render: (row: any) => h(NSpace, null, {
-                  default: () => [
-                    h(NButton, { size: 'small', onClick: () => startRemoteRestore(row.filename) }, { default: () => '恢复' }),
-                    h(NPopconfirm, { onPositiveClick: () => deleteVersion(row.filename) }, {
-                      trigger: () => h(NButton, { size: 'small', type: 'error' }, { default: () => '删除' }),
-                      default: () => `确认删除 ${row.filename}?`,
-                    }),
-                  ]
-                }) },
-            ]"
-            :data="remoteVersions"
-            size="small"
-          />
-        </n-collapse-transition>
       </n-space>
     </n-card>
       </n-space>
@@ -311,6 +290,29 @@
         <n-button @click="restoreConfirm.show = false">取消</n-button>
         <n-button type="error" :disabled="!restoreConfirm.agreed" @click="confirmRemoteRestore">确认恢复</n-button>
       </template>
+    </n-modal>
+
+    <!-- 版本管理弹窗 -->
+    <n-modal v-model:show="showVersions" preset="card" title="远程备份版本" style="width: 720px; max-width: 90vw">
+      <n-data-table
+        :columns="[
+          { title: '文件名', key: 'filename' },
+          { title: '大小', key: 'size', render: (row: any) => (row.size / 1024).toFixed(1) + ' KB' },
+          { title: '修改时间', key: 'modified_at' },
+          { title: '操作', key: 'actions', render: (row: any) => h(NSpace, null, {
+              default: () => [
+                h(NButton, { size: 'small', onClick: () => startRemoteRestore(row.filename) }, { default: () => '恢复' }),
+                h(NPopconfirm, { onPositiveClick: () => deleteVersion(row.filename) }, {
+                  trigger: () => h(NButton, { size: 'small', type: 'error' }, { default: () => '删除' }),
+                  default: () => `确认删除 ${row.filename}?`,
+                }),
+              ]
+            }) },
+        ]"
+        :data="remoteVersions"
+        size="small"
+        :bordered="false"
+      />
     </n-modal>
 
     <UpdateNotification ref="updateNotification" />
