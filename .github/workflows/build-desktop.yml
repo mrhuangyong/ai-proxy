@@ -139,8 +139,14 @@ jobs:
 
       # Tauri uses platform-native toolchains on each runner.
       # This workflow only builds unsigned artifacts and uploads them as workflow artifacts.
+      # bundle_dmg.sh intermittently fails on macOS runners ("Resource busy" on
+      # hdiutil detach), so retry the build up to 3 times on macOS.
       - name: Build desktop app
-        run: pnpm tauri build
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          command: pnpm tauri build
 
       - name: Upload desktop bundle
         uses: actions/upload-artifact@v4
