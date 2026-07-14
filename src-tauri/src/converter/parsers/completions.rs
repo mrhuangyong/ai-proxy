@@ -255,7 +255,11 @@ impl FormatParser for CompletionsParser {
             .collect();
             for (key, val) in obj {
                 if !known_keys.contains(key.as_str()) {
-                    tracing::debug!("CompletionsParser: capturing extra field '{}' = {}", key, val);
+                    tracing::debug!(
+                        "CompletionsParser: capturing extra field '{}' = {}",
+                        key,
+                        val
+                    );
                     extra.insert(key.clone(), val.clone());
                 }
             }

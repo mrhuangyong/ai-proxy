@@ -142,6 +142,14 @@
             </n-input-number>
             <n-button
               quaternary
+              size="small"
+              :type="hasNonPermissiveCaps(index) ? 'warning' : 'default'"
+              @click="openCapModal(index)"
+            >
+              能力
+            </n-button>
+            <n-button
+              quaternary
               type="error"
               size="small"
               @click="removeModel(index)"
@@ -154,6 +162,53 @@
           </n-button>
         </n-space>
       </n-form>
+    </n-modal>
+
+    <n-modal
+      v-model:show="showCapModal"
+      preset="card"
+      title="模型能力 — Failover 参数兼容"
+      style="width: 560px"
+    >
+      <n-space vertical>
+        <n-alert type="info" :bordered="false">
+          关闭某项能力后，轮换到该模型时会自动剥离对应参数，避免上游 4xx。
+          默认全开（与历史行为一致）。
+        </n-alert>
+        <template v-if="capEditingIndex !== null && form.models[capEditingIndex]">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; margin-top: 8px">
+            <div
+              v-for="cap in CAP_TOGGLES"
+              :key="cap.key"
+              style="display: flex; align-items: center; justify-content: space-between"
+            >
+              <span style="font-size: 13px">{{ cap.label }}</span>
+              <n-switch
+                :value="!!form.models[capEditingIndex].capabilities[cap.key]"
+                @update:value="(v: boolean | string) => (form.models[capEditingIndex!].capabilities[cap.key] = !!v as never)"
+              />
+            </div>
+          </div>
+          <n-divider style="margin: 12px 0" />
+          <div style="display: flex; align-items: center; gap: 12px">
+            <span style="font-size: 13px; min-width: 140px">max_tokens 上限</span>
+            <n-input-number
+              v-model:value="form.models[capEditingIndex].capabilities.max_output_tokens"
+              placeholder="不限"
+              :min="1"
+              :step="1024"
+              style="flex: 1"
+              clearable
+            >
+              <template #suffix>tokens</template>
+            </n-input-number>
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px">
+            <n-button size="small" @click="resetCaps(capEditingIndex)">恢复默认</n-button>
+            <n-button size="small" type="primary" @click="showCapModal = false">完成</n-button>
+          </div>
+        </template>
+      </n-space>
     </n-modal>
 
     <n-modal
@@ -210,7 +265,7 @@
 import { ref, onMounted } from 'vue'
 import { useMessage } from 'naive-ui'
 import { api } from '../api'
-import type { Provider } from '../types'
+import type { Provider, ModelCapabilities } from '../types'
 
 interface TestResult {
   success: boolean
@@ -238,6 +293,43 @@ const testResult = ref<TestResult | null>(null)
 
 const CLAUDE_CLI_UA = 'claude-cli/2.1.181 (external, cli)'
 
+/** Permissive defaults for a model's capability flags — matches the DB
+ * defaults (migration 026) so unconfigured models behave as before. */
+function defaultCapabilities(): ModelCapabilities {
+  return {
+    supports_thinking: true,
+    supports_tools: true,
+    supports_temperature: true,
+    supports_top_p: true,
+    supports_top_k: true,
+    supports_presence_penalty: true,
+    supports_frequency_penalty: true,
+    supports_seed: true,
+    supports_response_format: true,
+    supports_stream_options: true,
+    supports_stop: true,
+    max_output_tokens: null,
+    extra_passthrough: true,
+  }
+}
+
+/** List of capability toggles for the editor popover. `label` is the user-
+ * facing name; `key` is the ModelCapabilities field. */
+const CAP_TOGGLES: Array<{ key: keyof ModelCapabilities; label: string }> = [
+  { key: 'supports_thinking', label: '思考 / 推理' },
+  { key: 'supports_tools', label: '工具调用' },
+  { key: 'supports_temperature', label: 'temperature' },
+  { key: 'supports_top_p', label: 'top_p' },
+  { key: 'supports_top_k', label: 'top_k' },
+  { key: 'supports_presence_penalty', label: 'presence_penalty' },
+  { key: 'supports_frequency_penalty', label: 'frequency_penalty' },
+  { key: 'supports_seed', label: 'seed' },
+  { key: 'supports_response_format', label: 'response_format' },
+  { key: 'supports_stream_options', label: 'stream_options' },
+  { key: 'supports_stop', label: 'stop' },
+  { key: 'extra_passthrough', label: '透传未知参数 (extra)' },
+]
+
 const form = ref({
   name: '',
   base_url: '',
@@ -250,6 +342,7 @@ const form = ref({
     model_name: string
     target_model?: string | null
     context_window: number | null
+    capabilities: ModelCapabilities
   }>,
 })
 
@@ -269,7 +362,7 @@ const formatColorMap: Record<string, string> = {
 function addModel() {
   form.value.models = [
     ...form.value.models,
-    { model_name: '', context_window: null },
+    { model_name: '', context_window: null, capabilities: defaultCapabilities() },
   ]
 }
 
@@ -307,6 +400,7 @@ function openEditModal(row: Provider) {
       model_name: m.model_name,
       target_model: m.target_model ?? null,
       context_window: m.context_window ?? null,
+      capabilities: m.capabilities ?? defaultCapabilities(),
     })),
   }
   showModal.value = true
@@ -319,6 +413,36 @@ function openTestModal(row: Provider) {
   testResult.value = null
   testingModel.value = ''
   showTestModal.value = true
+}
+
+// ---- Capability editor ----
+const showCapModal = ref(false)
+const capEditingIndex = ref<number | null>(null)
+
+function openCapModal(index: number) {
+  capEditingIndex.value = index
+  showCapModal.value = true
+}
+
+/** True when a model's capabilities differ from the permissive defaults —
+ * used to highlight the "能力" button so the user can see which models have
+ * custom parameter filtering applied. */
+function hasNonPermissiveCaps(index: number): boolean {
+  const caps = form.value.models[index]?.capabilities
+  if (!caps) return false
+  const def = defaultCapabilities()
+  return (Object.keys(def) as Array<keyof ModelCapabilities>).some((k) => {
+    if (k === 'max_output_tokens') {
+      return caps[k] !== null
+    }
+    return caps[k] !== def[k]
+  })
+}
+
+function resetCaps(index: number) {
+  if (form.value.models[index]) {
+    form.value.models[index].capabilities = defaultCapabilities()
+  }
 }
 
 async function handleTestModel(modelName: string) {
@@ -369,6 +493,7 @@ async function handleSubmit() {
           model_name: m.model_name,
           target_model: m.target_model ?? null,
           context_window: m.context_window,
+          capabilities: m.capabilities,
         })),
       }
       if (form.value.api_key) {
@@ -392,6 +517,7 @@ async function handleSubmit() {
           models: form.value.models.map((m) => ({
             model_name: m.model_name,
             target_model: null,
+            capabilities: m.capabilities,
           })),
         }),
       })

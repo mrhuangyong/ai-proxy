@@ -88,6 +88,30 @@ struct ModelInput {
     model_name: String,
     target_model: Option<String>,
     context_window: Option<i64>,
+    /// Per-model capability flags (migration 026). Omitted/partial → defaults
+    /// are permissive (everything allowed), so existing callers behave the
+    /// same as before.
+    #[serde(default)]
+    capabilities: Option<CapabilitiesInput>,
+}
+
+/// Incoming capability overrides. Every field is optional; `None` keeps the
+/// DB column at its permissive default (1, or NULL for `max_output_tokens`).
+#[derive(Deserialize, Default)]
+struct CapabilitiesInput {
+    supports_thinking: Option<bool>,
+    supports_tools: Option<bool>,
+    supports_temperature: Option<bool>,
+    supports_top_p: Option<bool>,
+    supports_top_k: Option<bool>,
+    supports_presence_penalty: Option<bool>,
+    supports_frequency_penalty: Option<bool>,
+    supports_seed: Option<bool>,
+    supports_response_format: Option<bool>,
+    supports_stream_options: Option<bool>,
+    supports_stop: Option<bool>,
+    max_output_tokens: Option<i64>,
+    extra_passthrough: Option<bool>,
 }
 
 async fn create_provider(
@@ -111,9 +135,24 @@ async fn create_provider(
 
     for m in &body.models {
         let model_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO provider_models (id, provider_id, model_name, target_model, context_window) VALUES (?, ?, ?, ?, ?)")
-            .bind(&model_id).bind(&id).bind(&m.model_name).bind(&m.target_model).bind(m.context_window.unwrap_or(272000i64))
-            .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
+        let caps = cap_overrides_for(m.capabilities.as_ref());
+        sqlx::query(
+            "INSERT INTO provider_models \
+             (id, provider_id, model_name, target_model, context_window, \
+              supports_thinking, supports_tools, supports_temperature, supports_top_p, supports_top_k, \
+              supports_presence_penalty, supports_frequency_penalty, supports_seed, \
+              supports_response_format, supports_stream_options, supports_stop, \
+              max_output_tokens, extra_passthrough) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&model_id).bind(&id).bind(&m.model_name).bind(&m.target_model).bind(m.context_window.unwrap_or(272000i64))
+        .bind(caps.supports_thinking).bind(caps.supports_tools).bind(caps.supports_temperature)
+        .bind(caps.supports_top_p).bind(caps.supports_top_k)
+        .bind(caps.supports_presence_penalty).bind(caps.supports_frequency_penalty)
+        .bind(caps.supports_seed).bind(caps.supports_response_format)
+        .bind(caps.supports_stream_options).bind(caps.supports_stop)
+        .bind(caps.max_output_tokens).bind(caps.extra_passthrough)
+        .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
     }
 
     let (encrypted, nonce) = encrypt_api_key(&body.api_key).map_err(|e| err_json(e.to_string()))?;
@@ -217,16 +256,27 @@ async fn update_provider_models(
     let mut seen_ids: HashSet<&str> = HashSet::new();
 
     for m in models {
+        let caps = cap_overrides_for(m.capabilities.as_ref());
         // Only honour `id` when it belongs to this provider.
         if let Some(ref mid) = m.id {
             if own_ids.contains(mid.as_str()) {
                 seen_ids.insert(mid.as_str());
                 sqlx::query(
-                    "UPDATE provider_models SET model_name = ?, target_model = ?, context_window = ? WHERE id = ? AND provider_id = ?",
+                    "UPDATE provider_models SET model_name = ?, target_model = ?, context_window = ?, \
+                     supports_thinking = ?, supports_tools = ?, supports_temperature = ?, supports_top_p = ?, supports_top_k = ?, \
+                     supports_presence_penalty = ?, supports_frequency_penalty = ?, supports_seed = ?, \
+                     supports_response_format = ?, supports_stream_options = ?, supports_stop = ?, \
+                     max_output_tokens = ?, extra_passthrough = ? WHERE id = ? AND provider_id = ?",
                 )
                 .bind(&m.model_name)
                 .bind(&m.target_model)
                 .bind(m.context_window.unwrap_or(272000i64))
+                .bind(caps.supports_thinking).bind(caps.supports_tools).bind(caps.supports_temperature)
+                .bind(caps.supports_top_p).bind(caps.supports_top_k)
+                .bind(caps.supports_presence_penalty).bind(caps.supports_frequency_penalty)
+                .bind(caps.supports_seed).bind(caps.supports_response_format)
+                .bind(caps.supports_stream_options).bind(caps.supports_stop)
+                .bind(caps.max_output_tokens).bind(caps.extra_passthrough)
                 .bind(mid)
                 .bind(provider_id)
                 .execute(pool)
@@ -241,17 +291,34 @@ async fn update_provider_models(
         // in-place UPDATE instead of a constraint error.
         let new_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO provider_models (id, provider_id, model_name, target_model, context_window) \
-             VALUES (?, ?, ?, ?, ?) \
+            "INSERT INTO provider_models \
+             (id, provider_id, model_name, target_model, context_window, \
+              supports_thinking, supports_tools, supports_temperature, supports_top_p, supports_top_k, \
+              supports_presence_penalty, supports_frequency_penalty, supports_seed, \
+              supports_response_format, supports_stream_options, supports_stop, \
+              max_output_tokens, extra_passthrough) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(provider_id, model_name) DO UPDATE SET \
-               target_model = excluded.target_model, \
-               context_window = excluded.context_window",
+               target_model = excluded.target_model, context_window = excluded.context_window, \
+               supports_thinking = excluded.supports_thinking, supports_tools = excluded.supports_tools, \
+               supports_temperature = excluded.supports_temperature, supports_top_p = excluded.supports_top_p, \
+               supports_top_k = excluded.supports_top_k, supports_presence_penalty = excluded.supports_presence_penalty, \
+               supports_frequency_penalty = excluded.supports_frequency_penalty, supports_seed = excluded.supports_seed, \
+               supports_response_format = excluded.supports_response_format, supports_stream_options = excluded.supports_stream_options, \
+               supports_stop = excluded.supports_stop, max_output_tokens = excluded.max_output_tokens, \
+               extra_passthrough = excluded.extra_passthrough",
         )
         .bind(&new_id)
         .bind(provider_id)
         .bind(&m.model_name)
         .bind(&m.target_model)
         .bind(m.context_window.unwrap_or(272000i64))
+        .bind(caps.supports_thinking).bind(caps.supports_tools).bind(caps.supports_temperature)
+        .bind(caps.supports_top_p).bind(caps.supports_top_k)
+        .bind(caps.supports_presence_penalty).bind(caps.supports_frequency_penalty)
+        .bind(caps.supports_seed).bind(caps.supports_response_format)
+        .bind(caps.supports_stream_options).bind(caps.supports_stop)
+        .bind(caps.max_output_tokens).bind(caps.extra_passthrough)
         .execute(pool)
         .await
         .map_err(|e| err_json(e.to_string()))?;
@@ -270,6 +337,67 @@ async fn update_provider_models(
     }
 
     Ok(())
+}
+
+/// Resolve incoming capability overrides into concrete SQL-bound values.
+///
+/// `None` (the caller omitted capabilities entirely) → all permissive
+/// (booleans = 1, `max_output_tokens` = NULL). Any individual `Option<bool>`
+/// left `None` inside `CapabilitiesInput` also falls back to permissive, so a
+/// frontend that only toggles one switch does not clobber the rest.
+struct CapOverrides {
+    supports_thinking: i64,
+    supports_tools: i64,
+    supports_temperature: i64,
+    supports_top_p: i64,
+    supports_top_k: i64,
+    supports_presence_penalty: i64,
+    supports_frequency_penalty: i64,
+    supports_seed: i64,
+    supports_response_format: i64,
+    supports_stream_options: i64,
+    supports_stop: i64,
+    /// None → NULL (no clamp).
+    max_output_tokens: Option<i64>,
+    extra_passthrough: i64,
+}
+
+fn cap_overrides_for(caps: Option<&CapabilitiesInput>) -> CapOverrides {
+    fn b(v: Option<bool>) -> i64 {
+        v.unwrap_or(true).into()
+    }
+    match caps {
+        None => CapOverrides {
+            supports_thinking: 1,
+            supports_tools: 1,
+            supports_temperature: 1,
+            supports_top_p: 1,
+            supports_top_k: 1,
+            supports_presence_penalty: 1,
+            supports_frequency_penalty: 1,
+            supports_seed: 1,
+            supports_response_format: 1,
+            supports_stream_options: 1,
+            supports_stop: 1,
+            max_output_tokens: None,
+            extra_passthrough: 1,
+        },
+        Some(c) => CapOverrides {
+            supports_thinking: b(c.supports_thinking),
+            supports_tools: b(c.supports_tools),
+            supports_temperature: b(c.supports_temperature),
+            supports_top_p: b(c.supports_top_p),
+            supports_top_k: b(c.supports_top_k),
+            supports_presence_penalty: b(c.supports_presence_penalty),
+            supports_frequency_penalty: b(c.supports_frequency_penalty),
+            supports_seed: b(c.supports_seed),
+            supports_response_format: b(c.supports_response_format),
+            supports_stream_options: b(c.supports_stream_options),
+            supports_stop: b(c.supports_stop),
+            max_output_tokens: c.max_output_tokens,
+            extra_passthrough: b(c.extra_passthrough),
+        },
+    }
 }
 
 async fn delete_provider(Path(id): Path<String>) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
@@ -1388,13 +1516,12 @@ async fn handle_runtime_logs_ws(mut socket: WebSocket) {
 
 /// Mark sync_dirty=true if sync_on_change is enabled. Best-effort, never fails the caller.
 pub(crate) async fn mark_sync_dirty(pool: &sqlx::SqlitePool) {
-    let on: Option<(String,)> = sqlx::query_as(
-        "SELECT value FROM settings WHERE key = 'sync_on_change'",
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let on: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'sync_on_change'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
     if on.as_ref().map(|(v,)| v.as_str()) == Some("true") {
         let _ = sqlx::query(
             "UPDATE settings SET value='true', updated_at=datetime('now') WHERE key='sync_dirty'",

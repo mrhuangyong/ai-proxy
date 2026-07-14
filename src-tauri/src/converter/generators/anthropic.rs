@@ -233,7 +233,10 @@ impl FormatGenerator for AnthropicGenerator {
 
         // Pass through any extra parameters
         if !ir.extra.is_empty() {
-            tracing::debug!("AnthropicGenerator injecting {} extra field(s) into upstream body", ir.extra.len());
+            tracing::debug!(
+                "AnthropicGenerator injecting {} extra field(s) into upstream body",
+                ir.extra.len()
+            );
         }
         for (key, val) in &ir.extra {
             if key != "has_cache_control" && key != "metadata" {

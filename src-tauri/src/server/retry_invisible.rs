@@ -191,8 +191,15 @@ fn extract_retryable_error(v: &serde_json::Value) -> Option<BodyError> {
 
     // 2. Keyword match against message + type (case-insensitive).
     let haystack = format!("{} {}", message, etype).to_lowercase();
-    if RETRYABLE_BUSINESS_KEYWORDS.iter().any(|kw| haystack.contains(kw)) {
-        let label = if etype.is_empty() { "business_error" } else { etype };
+    if RETRYABLE_BUSINESS_KEYWORDS
+        .iter()
+        .any(|kw| haystack.contains(kw))
+    {
+        let label = if etype.is_empty() {
+            "business_error"
+        } else {
+            etype
+        };
         return Some(BodyError {
             message: format!("{} {}", label, message),
         });
