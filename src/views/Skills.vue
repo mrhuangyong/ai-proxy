@@ -916,7 +916,7 @@ async function handleInstallToTargets() {
 
   installTargetLoading.value = true
   try {
-    await api(`/api/skills/${installTargetSkill.value.id}/install`, {
+    await api('/api/skills/install', {
       method: 'POST',
       body: JSON.stringify({
         skill_id: installTargetSkill.value.id,
@@ -938,7 +938,7 @@ async function handleInstallToTargets() {
 
 async function handleUninstall(skillId: string) {
   try {
-    await api(`/api/skills/${skillId}/uninstall`, {
+    await api('/api/skills/uninstall', {
       method: 'POST',
       body: JSON.stringify({ skill_id: skillId }),
     })
