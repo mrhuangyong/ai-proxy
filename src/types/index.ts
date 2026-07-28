@@ -10,6 +10,24 @@ export interface Provider {
   api_keys: ApiKeyInfo[]
 }
 
+export interface ModelCapabilities {
+  supports_thinking: boolean
+  supports_tools: boolean
+  supports_temperature: boolean
+  supports_top_p: boolean
+  supports_top_k: boolean
+  supports_presence_penalty: boolean
+  supports_frequency_penalty: boolean
+  supports_seed: boolean
+  supports_response_format: boolean
+  supports_stream_options: boolean
+  supports_stop: boolean
+  /** Null = do not clamp. */
+  max_output_tokens: number | null
+  /** When false, the unguarded `extra` passthrough is cleared. */
+  extra_passthrough: boolean
+}
+
 export interface ProviderModel {
   id: string
   provider_id: string
@@ -18,6 +36,7 @@ export interface ProviderModel {
   context_window: number
   enabled: boolean
   created_at: string
+  capabilities: ModelCapabilities
 }
 
 export interface ApiKeyInfo {

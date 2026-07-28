@@ -66,7 +66,10 @@ async fn non_stream_200_business_error_is_retried_until_exhausted() {
             last_error,
             ..
         } => {
-            assert!(retry_count >= 1, "must retry at least once, got {retry_count}");
+            assert!(
+                retry_count >= 1,
+                "must retry at least once, got {retry_count}"
+            );
             assert!(
                 last_error.contains("10310") || last_error.contains("business error"),
                 "last_error should mention the business error, got: {last_error}"
@@ -130,7 +133,10 @@ async fn non_stream_200_business_error_then_succeeds() {
         } => {
             assert_eq!(retry_count, 1, "should retry exactly once then succeed");
             let text = String::from_utf8(bytes).unwrap();
-            assert!(text.contains("Hi"), "final body should be the success response");
+            assert!(
+                text.contains("Hi"),
+                "final body should be the success response"
+            );
         }
         other => panic!("expected CompletedBuffer, got {:?}", other),
     }

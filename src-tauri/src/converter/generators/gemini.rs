@@ -139,7 +139,10 @@ impl FormatGenerator for GeminiGenerator {
 
         // Pass through any extra parameters
         if !ir.extra.is_empty() {
-            tracing::debug!("GeminiGenerator injecting {} extra field(s) into upstream body", ir.extra.len());
+            tracing::debug!(
+                "GeminiGenerator injecting {} extra field(s) into upstream body",
+                ir.extra.len()
+            );
         }
         for (key, val) in &ir.extra {
             tracing::trace!("GeminiGenerator extra: {} = {}", key, val);

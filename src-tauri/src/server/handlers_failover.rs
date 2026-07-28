@@ -2,9 +2,18 @@
 //!
 //! These handlers accept a virtual model name (in `body.model` for
 //! completions/responses/anthropic, or in the URL path for Gemini) and resolve
-//! it through `VirtualRouter::resolve`. On upstream failure (5xx / 429 / proxy
-//! error), they record the failure and retry the next mapping — preserving
-//! "sticky" semantics by honouring `virtual_models.current_mapping_id`.
+//! it through `VirtualRouter::resolve`. On upstream failure it rotates to the
+//! next mapping, with two distinct failure classes:
+//!
+//! - Provider failure (429 / 5xx / 502): recorded against the mapping's
+//!   `consecutive_failures` (may trip the threshold and mark it down).
+//! - Parameter/validation 4xx (400/404/413/415/422…, excluding 401/403):
+//!   rotated to the next mapping *without* penalty — a param mismatch is a
+//!   request-side problem, not a provider outage.
+//!
+//! Per-model capability flags (`provider_models.supports_*`, migration 026)
+//! drive upstream-body sanitization so that a parameter valid for one mapping
+//! is stripped before being sent to a different model reached via rotation.
 
 use axum::body::Body;
 use axum::extract::{Path, Request};
@@ -267,11 +276,32 @@ async fn run_failover(
         .await;
 
         let status = response.status();
-        let is_failure = status == axum::http::StatusCode::TOO_MANY_REQUESTS
+        // Two distinct failure classes, with different penalty semantics:
+        //
+        // - Provider failure (429 / 5xx / 502): the upstream is unhealthy.
+        //   We record the failure (may trip the threshold and mark the mapping
+        //   available=0) and rotate to the next mapping.
+        //
+        // - Parameter/validation 4xx (400/404/413/415/422…): the request is
+        //   incompatible with this mapping (a param the model rejects, or a
+        //   capability gap). We rotate to the next mapping so the client gets
+        //   a chance on a compatible model, but we do NOT count it against
+        //   the mapping's `consecutive_failures` — this is a request-side
+        //   problem, not a provider outage, and counting it would let a single
+        //   ill-formed client exhaust good mappings.
+        //
+        //   401/403 are excluded from rotation: an auth failure is almost
+        //   certain to repeat on every mapping sharing that provider's keys,
+        //   so we return it to the client immediately instead of burning all
+        //   `max_failover` attempts.
+        let is_provider_failure = status == axum::http::StatusCode::TOO_MANY_REQUESTS
             || status.is_server_error()
             || status == axum::http::StatusCode::BAD_GATEWAY;
+        let is_param_4xx = status.is_client_error()
+            && status != axum::http::StatusCode::UNAUTHORIZED
+            && status != axum::http::StatusCode::FORBIDDEN;
 
-        if !is_failure {
+        if !is_provider_failure && !is_param_4xx {
             if status.is_success() {
                 // Determine whether this is a streaming response.
                 let is_stream = response
@@ -287,16 +317,13 @@ async fn run_failover(
                 // SessionOutcome::Exhausted). Treat it as a failure so failover
                 // can kick in instead of passing the error through to the client.
                 if !is_stream {
-                    let bytes = match axum::body::to_bytes(
-                        response.into_body(),
-                        64 * 1024,
-                    ).await {
+                    let bytes = match axum::body::to_bytes(response.into_body(), 64 * 1024).await {
                         Ok(b) => b,
                         Err(_) => {
                             // Can't read body — treat as failure to be safe.
-                            let became_unavail = VirtualRouter::record_failure(
-                                &resolved.mapping_id, threshold,
-                            ).await;
+                            let became_unavail =
+                                VirtualRouter::record_failure(&resolved.mapping_id, threshold)
+                                    .await;
                             warn!(
                                 "[failover] virtual={} mapping={} body-unreadable became_unavail={}",
                                 virtual_name, resolved.mapping_id, became_unavail
@@ -313,13 +340,14 @@ async fn run_failover(
                     let body_str = String::from_utf8_lossy(&bytes);
                     let looks_like_error = body_str.contains("\"error\"")
                         || body_str.contains("\"type\":\"upstream_error\"")
-                        || body_str.contains("upstream failed after");
+                        || body_str.contains("upstream failed after")
+                        || body_str.contains("\"invalid")
+                        || body_str.contains("unsupported")
+                        || body_str.contains("not support")
+                        || body_str.contains("does not support");
                     if looks_like_error {
-                        let became_unavail = VirtualRouter::record_failure(
-                            &resolved.mapping_id,
-                            threshold,
-                        )
-                        .await;
+                        let became_unavail =
+                            VirtualRouter::record_failure(&resolved.mapping_id, threshold).await;
                         warn!(
                             "[failover] virtual={} mapping={} 200-but-error body, became_unavail={}: {}",
                             virtual_name,
@@ -362,11 +390,23 @@ async fn run_failover(
             return response;
         }
 
-        let became_unavail = VirtualRouter::record_failure(&resolved.mapping_id, threshold).await;
-        warn!(
-            "[failover] virtual={} mapping={} status={} became_unavail={}",
-            virtual_name, resolved.mapping_id, status, became_unavail
-        );
+        // Rotate on failure — but only count provider failures against the
+        // mapping's health. A param 4xx rotates silently (no penalty).
+        if is_provider_failure {
+            let became_unavail =
+                VirtualRouter::record_failure(&resolved.mapping_id, threshold).await;
+            warn!(
+                "[failover] virtual={} mapping={} status={} became_unavail={}",
+                virtual_name, resolved.mapping_id, status, became_unavail
+            );
+        } else {
+            // is_param_4xx: rotate to try a compatible mapping, but do not
+            // punish this mapping — a parameter mismatch is not an outage.
+            info!(
+                "[failover] virtual={} mapping={} param/4xx status={}, rotating without penalty",
+                virtual_name, resolved.mapping_id, status
+            );
+        }
         excluded.push(resolved.mapping_id.clone());
         last_response = Some(response);
         attempts += 1;

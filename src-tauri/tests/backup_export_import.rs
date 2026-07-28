@@ -334,10 +334,12 @@ async fn test_export_filters_machine_bound_secrets() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE settings SET value = 'ciphertext:nonce' WHERE key = 'sync_webdav_password'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE settings SET value = 'ciphertext:nonce' WHERE key = 'sync_webdav_password'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let bytes = export_bundle_with_passphrase(&pool, "pw").await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

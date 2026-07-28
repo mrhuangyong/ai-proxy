@@ -309,7 +309,10 @@ where
                     if let Some(err) = classify_body_error(&b, &client_format) {
                         last_status = Some(status);
                         last_error = format!("business error in 200 body: {}", err.message);
-                        tracing::warn!("[retry] non-stream 200 body error, retrying: {}", err.message);
+                        tracing::warn!(
+                            "[retry] non-stream 200 body error, retrying: {}",
+                            err.message
+                        );
                         let wait = compute_backoff_ms(attempt, config.backoff_base_ms, None);
                         sleep(Duration::from_millis(wait)).await;
                         attempt += 1;

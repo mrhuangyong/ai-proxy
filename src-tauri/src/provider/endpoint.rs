@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::converter::sanitize::ModelCapabilities;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     pub id: String,
@@ -22,6 +24,8 @@ pub struct ProviderModel {
     pub context_window: u64,
     pub enabled: bool,
     pub created_at: String,
+    #[serde(default = "ModelCapabilities::permissive")]
+    pub capabilities: ModelCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

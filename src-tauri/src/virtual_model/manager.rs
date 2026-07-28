@@ -10,6 +10,7 @@ use sqlx::FromRow;
 use tracing::{info, warn};
 
 use crate::converter::ir::ClientFormat;
+use crate::converter::sanitize::ModelCapabilities;
 use crate::db::get_pool;
 use crate::error::ProxyError;
 use crate::provider::manager::{parse_client_format, ResolvedRoute};
@@ -55,6 +56,41 @@ struct DbResolvableCandidate {
     /// Aliased in SQL `ORDER BY` for sticky-first sorting; not read from the row.
     #[allow(dead_code)]
     sticky: i64,
+    // Capability columns (migration 026). Option<i64> so older rows still
+    // deserialize; None is treated as the permissive default.
+    supports_thinking: Option<i64>,
+    supports_tools: Option<i64>,
+    supports_temperature: Option<i64>,
+    supports_top_p: Option<i64>,
+    supports_top_k: Option<i64>,
+    supports_presence_penalty: Option<i64>,
+    supports_frequency_penalty: Option<i64>,
+    supports_seed: Option<i64>,
+    supports_response_format: Option<i64>,
+    supports_stream_options: Option<i64>,
+    supports_stop: Option<i64>,
+    max_output_tokens: Option<i64>,
+    extra_passthrough: Option<i64>,
+}
+
+impl DbResolvableCandidate {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_thinking: self.supports_thinking.unwrap_or(1) != 0,
+            supports_tools: self.supports_tools.unwrap_or(1) != 0,
+            supports_temperature: self.supports_temperature.unwrap_or(1) != 0,
+            supports_top_p: self.supports_top_p.unwrap_or(1) != 0,
+            supports_top_k: self.supports_top_k.unwrap_or(1) != 0,
+            supports_presence_penalty: self.supports_presence_penalty.unwrap_or(1) != 0,
+            supports_frequency_penalty: self.supports_frequency_penalty.unwrap_or(1) != 0,
+            supports_seed: self.supports_seed.unwrap_or(1) != 0,
+            supports_response_format: self.supports_response_format.unwrap_or(1) != 0,
+            supports_stream_options: self.supports_stream_options.unwrap_or(1) != 0,
+            supports_stop: self.supports_stop.unwrap_or(1) != 0,
+            max_output_tokens: self.max_output_tokens.map(|v| v as u32),
+            extra_passthrough: self.extra_passthrough.unwrap_or(1) != 0,
+        }
+    }
 }
 
 pub struct VirtualRouter;
@@ -81,7 +117,10 @@ impl VirtualRouter {
         let exclude_clause = if exclude.is_empty() {
             String::new()
         } else {
-            let placeholders = (0..exclude.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+            let placeholders = (0..exclude.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
             format!("AND m.id NOT IN ({})", placeholders)
         };
 
@@ -98,7 +137,20 @@ impl VirtualRouter {
                 p.endpoint_path,
                 p.upstream_user_agent,
                 p.name AS provider_name,
-                CASE WHEN v.current_mapping_id = m.id THEN 1 ELSE 0 END AS sticky
+                CASE WHEN v.current_mapping_id = m.id THEN 1 ELSE 0 END AS sticky,
+                pm.supports_thinking,
+                pm.supports_tools,
+                pm.supports_temperature,
+                pm.supports_top_p,
+                pm.supports_top_k,
+                pm.supports_presence_penalty,
+                pm.supports_frequency_penalty,
+                pm.supports_seed,
+                pm.supports_response_format,
+                pm.supports_stream_options,
+                pm.supports_stop,
+                pm.max_output_tokens,
+                pm.extra_passthrough
              FROM virtual_model_mappings m
              JOIN virtual_models v ON v.id = m.virtual_model_id
              JOIN provider_models pm ON pm.id = m.provider_model_id
@@ -142,6 +194,7 @@ impl VirtualRouter {
         .execute(pool)
         .await?;
 
+        let caps = c.capabilities();
         let target_model = c
             .target_model
             .clone()
@@ -172,6 +225,7 @@ impl VirtualRouter {
                 target_model,
                 endpoint_path,
                 upstream_user_agent: c.upstream_user_agent,
+                capabilities: caps,
             },
             mapping_id: c.mapping_id,
             virtual_name: virtual_name.to_string(),

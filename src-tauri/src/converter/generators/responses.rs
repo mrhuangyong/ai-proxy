@@ -167,7 +167,10 @@ impl FormatGenerator for ResponsesGenerator {
 
         // Pass through any extra parameters not already handled above
         if !ir.extra.is_empty() {
-            tracing::debug!("ResponsesGenerator injecting {} extra field(s) into upstream body", ir.extra.len());
+            tracing::debug!(
+                "ResponsesGenerator injecting {} extra field(s) into upstream body",
+                ir.extra.len()
+            );
         }
         for (key, val) in &ir.extra {
             if key != "previous_response_id" {

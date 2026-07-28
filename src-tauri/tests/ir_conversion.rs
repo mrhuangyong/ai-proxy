@@ -569,22 +569,21 @@ fn completions_extra_fields_roundtrip() {
     let ir = parser.parse_request(&body).unwrap();
 
     // Verify extra was captured
-    let kwargs = ir.extra.get("chat_template_kwargs").expect("chat_template_kwargs should be in extra");
-    assert_eq!(
-        kwargs,
-        &json!({ "enable_thinking": false })
-    );
+    let kwargs = ir
+        .extra
+        .get("chat_template_kwargs")
+        .expect("chat_template_kwargs should be in extra");
+    assert_eq!(kwargs, &json!({ "enable_thinking": false }));
 
     // Generate back to completions format
     let generator = CompletionsGenerator;
     let output = generator.generate_request(&ir).unwrap();
 
     // Verify extra field is in the output
-    let output_kwargs = output.get("chat_template_kwargs").expect("chat_template_kwargs should be in generated body");
-    assert_eq!(
-        output_kwargs,
-        &json!({ "enable_thinking": false })
-    );
+    let output_kwargs = output
+        .get("chat_template_kwargs")
+        .expect("chat_template_kwargs should be in generated body");
+    assert_eq!(output_kwargs, &json!({ "enable_thinking": false }));
 
     // Verify standard fields are still present
     assert_eq!(output["model"], "deepseek-chat");

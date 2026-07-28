@@ -341,6 +341,33 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 025: backup & sync settings");
     }
 
+    // Migration 026: per-model capability flags for failover parameter sanitization.
+    // All flags default to permissive (1) so existing models behave unchanged.
+    let has_model_caps: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('provider_models') WHERE name = 'supports_thinking'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_model_caps {
+        let migration26 = include_str!("../../migrations/026_model_capabilities.sql");
+        // The migration contains multiple ALTER TABLE statements; SQLite needs
+        // them executed one at a time.
+        let stripped: String = migration26
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await?;
+            }
+        }
+        info!("Applied migration 026: model capabilities");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

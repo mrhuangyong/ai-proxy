@@ -1,4 +1,5 @@
 use crate::converter::ir::ClientFormat;
+use crate::converter::sanitize::ModelCapabilities;
 use crate::db::get_pool;
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -14,6 +15,7 @@ pub struct ResolvedRoute {
     pub target_model: String,
     pub endpoint_path: String,
     pub upstream_user_agent: String,
+    pub capabilities: ModelCapabilities,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -36,6 +38,45 @@ struct DbProviderModel {
     context_window: i64,
     enabled: i64,
     created_at: String,
+    // Capability columns (migration 026). Option<i64> so older rows / partial
+    // reads still deserialize; None is treated as the permissive default.
+    supports_thinking: Option<i64>,
+    supports_tools: Option<i64>,
+    supports_temperature: Option<i64>,
+    supports_top_p: Option<i64>,
+    supports_top_k: Option<i64>,
+    supports_presence_penalty: Option<i64>,
+    supports_frequency_penalty: Option<i64>,
+    supports_seed: Option<i64>,
+    supports_response_format: Option<i64>,
+    supports_stream_options: Option<i64>,
+    supports_stop: Option<i64>,
+    max_output_tokens: Option<i64>,
+    extra_passthrough: Option<i64>,
+}
+
+impl DbProviderModel {
+    /// Constant SELECT clause for the capability columns, used by every
+    /// query that reads provider_models so they all stay in sync.
+    const CAP_COLS: &'static str = "pm.supports_thinking, pm.supports_tools, pm.supports_temperature, pm.supports_top_p, pm.supports_top_k, pm.supports_presence_penalty, pm.supports_frequency_penalty, pm.supports_seed, pm.supports_response_format, pm.supports_stream_options, pm.supports_stop, pm.max_output_tokens, pm.extra_passthrough";
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_thinking: self.supports_thinking.unwrap_or(1) != 0,
+            supports_tools: self.supports_tools.unwrap_or(1) != 0,
+            supports_temperature: self.supports_temperature.unwrap_or(1) != 0,
+            supports_top_p: self.supports_top_p.unwrap_or(1) != 0,
+            supports_top_k: self.supports_top_k.unwrap_or(1) != 0,
+            supports_presence_penalty: self.supports_presence_penalty.unwrap_or(1) != 0,
+            supports_frequency_penalty: self.supports_frequency_penalty.unwrap_or(1) != 0,
+            supports_seed: self.supports_seed.unwrap_or(1) != 0,
+            supports_response_format: self.supports_response_format.unwrap_or(1) != 0,
+            supports_stream_options: self.supports_stream_options.unwrap_or(1) != 0,
+            supports_stop: self.supports_stop.unwrap_or(1) != 0,
+            max_output_tokens: self.max_output_tokens.map(|v| v as u32),
+            extra_passthrough: self.extra_passthrough.unwrap_or(1) != 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -125,11 +166,14 @@ impl ProviderManager {
         let matched: DbProviderModel = match provider_id {
             Some(pid) => {
                 sqlx::query_as(
-                    "SELECT pm.id, pm.provider_id, pm.model_name, pm.target_model, pm.context_window, pm.enabled, pm.created_at
-                     FROM provider_models pm
-                     JOIN providers p ON p.id = pm.provider_id
-                     WHERE pm.model_name = ? COLLATE NOCASE AND pm.enabled = 1 AND p.enabled = 1 AND pm.provider_id = ?
-                     LIMIT 1",
+                    &format!(
+                        "SELECT pm.id, pm.provider_id, pm.model_name, pm.target_model, pm.context_window, pm.enabled, pm.created_at, {}
+                         FROM provider_models pm
+                         JOIN providers p ON p.id = pm.provider_id
+                         WHERE pm.model_name = ? COLLATE NOCASE AND pm.enabled = 1 AND p.enabled = 1 AND pm.provider_id = ?
+                         LIMIT 1",
+                        DbProviderModel::CAP_COLS
+                    ),
                 )
                 .bind(model)
                 .bind(pid)
@@ -138,11 +182,14 @@ impl ProviderManager {
             }
             None => {
                 sqlx::query_as(
-                    "SELECT pm.id, pm.provider_id, pm.model_name, pm.target_model, pm.context_window, pm.enabled, pm.created_at
-                     FROM provider_models pm
-                     JOIN providers p ON p.id = pm.provider_id
-                     WHERE pm.model_name = ? COLLATE NOCASE AND pm.enabled = 1 AND p.enabled = 1
-                     LIMIT 1",
+                    &format!(
+                        "SELECT pm.id, pm.provider_id, pm.model_name, pm.target_model, pm.context_window, pm.enabled, pm.created_at, {}
+                         FROM provider_models pm
+                         JOIN providers p ON p.id = pm.provider_id
+                         WHERE pm.model_name = ? COLLATE NOCASE AND pm.enabled = 1 AND p.enabled = 1
+                         LIMIT 1",
+                        DbProviderModel::CAP_COLS
+                    ),
                 )
                 .bind(model)
                 .fetch_one(pool)
@@ -191,6 +238,7 @@ impl ProviderManager {
             target_model,
             endpoint_path,
             upstream_user_agent: provider.upstream_user_agent,
+            capabilities: matched.capabilities(),
         })
     }
 
@@ -225,8 +273,11 @@ impl ProviderManager {
     ) -> Result<Vec<ProviderModel>, crate::error::ProxyError> {
         let pool = get_pool().await;
         let rows: Vec<DbProviderModel> = sqlx::query_as(
-            "SELECT id, provider_id, model_name, target_model, context_window, enabled, created_at
-             FROM provider_models WHERE provider_id = ? ORDER BY model_name",
+            &format!(
+                "SELECT pm.id, pm.provider_id, pm.model_name, pm.target_model, pm.context_window, pm.enabled, pm.created_at, {}
+                 FROM provider_models pm WHERE pm.provider_id = ? ORDER BY pm.model_name",
+                DbProviderModel::CAP_COLS
+            ),
         )
         .bind(provider_id)
         .fetch_all(pool)
@@ -235,14 +286,18 @@ impl ProviderManager {
 
         Ok(rows
             .into_iter()
-            .map(|r| ProviderModel {
-                id: r.id,
-                provider_id: r.provider_id,
-                model_name: r.model_name,
-                target_model: r.target_model,
-                context_window: r.context_window as u64,
-                enabled: r.enabled != 0,
-                created_at: r.created_at,
+            .map(|r| {
+                let caps = r.capabilities();
+                ProviderModel {
+                    id: r.id,
+                    provider_id: r.provider_id,
+                    model_name: r.model_name,
+                    target_model: r.target_model,
+                    context_window: r.context_window as u64,
+                    enabled: r.enabled != 0,
+                    created_at: r.created_at,
+                    capabilities: caps,
+                }
             })
             .collect())
     }

@@ -504,16 +504,12 @@ pub(crate) async fn handle_proxy_inner(
             "[ROUTE] (pre-resolved) {} -> {} ({})",
             client_model, r.target_model, r.provider_name
         );
-        // Non-standard Anthropic endpoints (e.g. Kimi coding) don't support thinking parameter.
-        if ir_request.thinking.is_some() {
-            if r.base_url.contains("kimi.com") || r.base_url.contains("moonshot.cn") {
-                tracing::info!(
-                    "Clearing thinking for non-standard Anthropic endpoint: {}",
-                    r.base_url
-                );
-                ir_request.thinking = None;
-            }
-        }
+        // Per-model parameter sanitization (e.g. stripping `thinking` for models
+        // that don't support it, clamping max_tokens) is now data-driven via the
+        // capability flags on `provider_models` (migration 026), applied below
+        // just before generating the upstream body. The old Kimi/Moonshot
+        // `base_url` substring check has been replaced by setting
+        // `supports_thinking = 0` on those models' rows.
         r
     } else {
         match ProviderManager::find_for_model(&ir_request.model).await {
@@ -526,17 +522,10 @@ pub(crate) async fn handle_proxy_inner(
                     "[ROUTE] {} -> {} ({})",
                     ir_request.model, r.target_model, r.provider_name
                 );
-                // Non-standard Anthropic endpoints (e.g. Kimi coding) don't support thinking parameter.
-                // Clear it to avoid upstream errors and max_tokens inflation.
-                if ir_request.thinking.is_some() {
-                    if r.base_url.contains("kimi.com") || r.base_url.contains("moonshot.cn") {
-                        tracing::info!(
-                            "Clearing thinking for non-standard Anthropic endpoint: {}",
-                            r.base_url
-                        );
-                        ir_request.thinking = None;
-                    }
-                }
+                // Per-model parameter sanitization is data-driven via capability
+                // flags on `provider_models` (migration 026); see the
+                // sanitize call below. The former Kimi/Moonshot `thinking`
+                // special-case is now expressed as `supports_thinking = 0`.
                 r
             }
             Err(e) => {
@@ -718,6 +707,19 @@ pub(crate) async fn handle_proxy_inner(
         ir_request_for_upstream.stream = true;
     }
 
+    // Per-model parameter sanitization: strip/clamp IR fields the target model
+    // does not support (data-driven via `provider_models` capability flags,
+    // migration 026). This is critical for the failover path, where the same
+    // client IR is reused across heterogeneous upstream mappings. Applied here
+    // — after model swap and reasoning injection, immediately before body
+    // generation — so the upstream body only carries parameters the model
+    // accepts. Permissive by default, so models with unconfigured capabilities
+    // behave exactly as before.
+    crate::converter::sanitize::sanitize_ir_for_capabilities(
+        &mut ir_request_for_upstream,
+        &route.capabilities,
+    );
+
     let target_body = match target_generator.generate_request(&ir_request_for_upstream) {
         Ok(b) => {
             // Log extra fields for debugging
@@ -731,13 +733,15 @@ pub(crate) async fn handle_proxy_inner(
             // ALWAYS log the complete upstream request body at info level
             // so the user can verify exactly what gets sent upstream
             if let Ok(json_str) = serde_json::to_string(&b) {
-                let upstream_host = route.base_url
+                let upstream_host = route
+                    .base_url
                     .trim_start_matches("https://")
                     .trim_start_matches("http://")
                     .split('/')
                     .next()
                     .unwrap_or("unknown");
-                tracing::info!("[UPSTREAM_BODY] {} {} body={}",
+                tracing::info!(
+                    "[UPSTREAM_BODY] {} {} body={}",
                     ir_request_for_upstream.model,
                     upstream_host,
                     json_str
@@ -2330,7 +2334,8 @@ impl Drop for StreamLoggingGuard {
                         let became_unavail = VirtualRouter::record_failure(&mid, thr).await;
                         tracing::warn!(
                             "[failover] mid-stream failure recorded mapping={} became_unavail={}",
-                            mid, became_unavail
+                            mid,
+                            became_unavail
                         );
                     });
                 } else {

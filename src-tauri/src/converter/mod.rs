@@ -1,6 +1,7 @@
 pub mod generators;
 pub mod ir;
 pub mod parsers;
+pub mod sanitize;
 
 use crate::error::ProxyError;
 use ir::{IrRequest, IrResponse, IrStreamChunk};
