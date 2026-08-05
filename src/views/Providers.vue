@@ -78,7 +78,12 @@
     >
       <n-form :model="form" label-placement="left" label-width="80">
         <n-form-item label="名称" required>
-          <n-input v-model:value="form.name" placeholder="例如: OpenAI" :input-props="{ autocapitalize: 'off' }" />
+          <n-input v-model:value="form.name" placeholder="例如: opencode" :input-props="{ autocapitalize: 'off' }" />
+          <template #feedback>
+            <n-text v-if="form.name && !/^[A-Za-z][A-Za-z0-9]*$/.test(form.name)" type="error" style="font-size: 12px">
+              仅支持英文字母与数字，必须以字母开头
+            </n-text>
+          </template>
         </n-form-item>
         <n-form-item label="Base URL" required>
           <n-input v-model:value="form.base_url" placeholder="例如: https://api.openai.com" :input-props="{ autocapitalize: 'off' }" />
@@ -472,6 +477,18 @@ async function handleTestModel(modelName: string) {
 async function handleSubmit() {
   if (!form.value.name || !form.value.base_url) {
     message.warning('请填写必填字段')
+    return false
+  }
+  const nameValid = /^[A-Za-z][A-Za-z0-9]*$/.test(form.value.name)
+  if (!nameValid) {
+    message.error('供应商名称仅支持英文字母与数字，必须以字母开头，不能包含空格或特殊字符')
+    return false
+  }
+  const dup = providers.value.find(
+    (p) => p.id !== editingId.value && p.name.toLowerCase() === form.value.name.toLowerCase(),
+  )
+  if (dup) {
+    message.error(`供应商名称 '${form.value.name}' 已存在`)
     return false
   }
   if (!isEditing.value && !form.value.api_key) {

@@ -1977,6 +1977,21 @@ fn get_generator(format: &ClientFormat) -> Box<dyn FormatGenerator> {
 use serde::Serialize;
 use serde_json::json;
 
+/// The `provider_name/model_name` qualified ID. Also the form used to target a
+/// specific provider via the proxy routing (see ProviderManager).
+fn qualified_model_id(provider_name: &str, model_name: &str) -> String {
+    format!("{}/{}", provider_name, model_name)
+}
+
+/// Match a requested model path against a route. Accepts both the bare
+/// `model_name` and the qualified `provider_name/model_name` form.
+fn route_matches_model(route: &ModelRouteInfo, requested: &str) -> bool {
+    if route.model_name == requested {
+        return true;
+    }
+    qualified_model_id(&route.provider_name, &route.model_name) == requested
+}
+
 pub async fn handle_list_models() -> Response {
     let models = match query_model_routes().await {
         Ok(m) => m,
@@ -1985,13 +2000,20 @@ pub async fn handle_list_models() -> Response {
 
     let data: Vec<Value> = models
         .iter()
-        .map(|m| {
-            json!({
+        .flat_map(|m| {
+            let bare = json!({
                 "id": m.model_name,
                 "object": "model",
                 "created": 0,
                 "owned_by": m.provider_name,
-            })
+            });
+            let qualified = json!({
+                "id": qualified_model_id(&m.provider_name, &m.model_name),
+                "object": "model",
+                "created": 0,
+                "owned_by": m.provider_name,
+            });
+            vec![bare, qualified]
         })
         .collect();
 
@@ -2009,12 +2031,12 @@ pub async fn handle_get_model(Path(model): Path<String>) -> Response {
         Err(e) => return e.into_response(),
     };
 
-    let found = models.iter().find(|m| m.model_name == model);
+    let found = models.iter().find(|m| route_matches_model(m, &model));
 
     match found {
         Some(m) => {
             let body = json!({
-                "id": m.model_name,
+                "id": qualified_model_id(&m.provider_name, &m.model_name),
                 "object": "model",
                 "created": 0,
                 "owned_by": m.provider_name,
@@ -2033,12 +2055,18 @@ pub async fn handle_gemini_list_models() -> Response {
 
     let gemini_models: Vec<Value> = models
         .iter()
-        .map(|m| {
-            json!({
+        .flat_map(|m| {
+            let bare = json!({
                 "name": format!("models/{}", m.model_name),
                 "displayName": m.model_name,
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
-            })
+            });
+            let qualified = json!({
+                "name": format!("models/{}", qualified_model_id(&m.provider_name, &m.model_name)),
+                "displayName": qualified_model_id(&m.provider_name, &m.model_name),
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+            });
+            vec![bare, qualified]
         })
         .collect();
 
@@ -2057,13 +2085,13 @@ pub async fn handle_gemini_get_model(Path(model): Path<String>) -> Response {
 
     let model_name = model.split(':').next().unwrap_or(&model);
 
-    let found = models.iter().find(|m| m.model_name == model_name);
+    let found = models.iter().find(|m| route_matches_model(m, model_name));
 
     match found {
         Some(m) => {
             let body = json!({
-                "name": format!("models/{}", m.model_name),
-                "displayName": m.model_name,
+                "name": format!("models/{}", qualified_model_id(&m.provider_name, &m.model_name)),
+                "displayName": qualified_model_id(&m.provider_name, &m.model_name),
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
             });
             axum::Json(body).into_response()

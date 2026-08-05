@@ -195,13 +195,16 @@ impl VirtualRouter {
         .await?;
 
         let caps = c.capabilities();
-        let target_model = c
-            .target_model
-            .clone()
-            .unwrap_or_else(|| c.model_name.clone());
+        // Empty string treated as unset (falls back to the literal model name).
+        let target_model = match c.target_model.as_deref() {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => c.model_name.clone(),
+        };
         let target_format = parse_client_format(&c.format)?;
+        // Empty-string endpoint_path treated as unset → default per-format path.
         let endpoint_path = c
             .endpoint_path
+            .filter(|p| !p.is_empty())
             .map(|p| {
                 if p.starts_with('/') {
                     p
