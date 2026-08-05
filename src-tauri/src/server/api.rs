@@ -56,6 +56,44 @@ pub fn err_json(msg: impl Into<String>) -> Json<ApiError> {
     })
 }
 
+/// Validate a provider name. Rules: only ASCII letters and digits, must start
+/// with a letter, no spaces or special characters. This keeps
+/// `provider_name/model_name` unambiguous (split on the first `/`).
+fn validate_provider_name(name: &str) -> Result<(), Json<ApiError>> {
+    let ok = name.len() >= 1
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c.is_ascii_digit())
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err(err_json(
+            "供应商名称仅支持英文字母与数字，必须以字母开头，不能包含空格或特殊字符",
+        ))
+    }
+}
+
+/// Case-insensitive duplicate check. `exclude_id` skips the provider being
+/// edited (the DB UNIQUE constraint is case-sensitive, but routing matches
+/// provider names case-insensitively, so we reject case-variants here too).
+async fn provider_name_exists(pool: &sqlx::SqlitePool, name: &str, exclude_id: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM providers WHERE name = ? COLLATE NOCASE AND id != ? LIMIT 1",
+    )
+    .bind(name)
+    .bind(exclude_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+        == Some(1)
+}
+
 // --- Provider handlers ---
 
 async fn list_providers() -> Result<Json<ApiResponse<Vec<Provider>>>, Json<ApiError>> {
@@ -119,6 +157,11 @@ async fn create_provider(
 ) -> Result<Json<ApiResponse<String>>, Json<ApiError>> {
     let pool = get_pool().await;
     let id = uuid::Uuid::new_v4().to_string();
+
+    validate_provider_name(&body.name)?;
+    if provider_name_exists(&pool, &body.name, "").await {
+        return Err(err_json(format!("供应商名称 '{}' 已存在", body.name)));
+    }
 
     sqlx::query(
         "INSERT INTO providers (id, name, base_url, format, endpoint_path, upstream_user_agent) VALUES (?, ?, ?, ?, ?, ?)",
@@ -194,6 +237,11 @@ async fn update_provider(
     let format = body.format.unwrap_or(current.2);
     let endpoint_path = body.endpoint_path.unwrap_or(current.3);
     let upstream_user_agent = body.upstream_user_agent.unwrap_or(current.4);
+
+    validate_provider_name(&name)?;
+    if provider_name_exists(&pool, &name, &id).await {
+        return Err(err_json(format!("供应商名称 '{}' 已存在", name)));
+    }
 
     sqlx::query("UPDATE providers SET name = ?, base_url = ?, format = ?, endpoint_path = ?, upstream_user_agent = ?, updated_at = datetime('now') WHERE id = ?")
         .bind(&name).bind(&base_url).bind(&format).bind(&endpoint_path).bind(&upstream_user_agent).bind(&id)
@@ -1978,4 +2026,34 @@ async fn search_skills_marketplace(
         .map_err(|e| err_json(format!("解析响应失败: {}", e)))?;
 
     Ok(ok(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_provider_name;
+
+    #[test]
+    fn valid_provider_names_pass() {
+        for name in ["opencode", "OpenCode", "openai123", "A", "a1b2c3"] {
+            assert!(validate_provider_name(name).is_ok(), "{name} should pass");
+        }
+    }
+
+    #[test]
+    fn invalid_provider_names_fail() {
+        for name in [
+            "",
+            "1opencode",
+            "opencode-go",
+            "opencode_go",
+            "opencode go",
+            "opencode/",
+            "中文",
+            "opencode!",
+            "a b",
+            "-opencode",
+        ] {
+            assert!(validate_provider_name(name).is_err(), "{name} should fail");
+        }
+    }
 }

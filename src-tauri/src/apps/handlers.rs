@@ -290,15 +290,34 @@ pub async fn launch_app(
         .flatten()
         .unwrap_or(272000) as u64
     } else {
-        sqlx::query_scalar::<_, i64>(
+        // Bare model name first; fall back to "provider_name/model_name".
+        let mut ctx: Option<i64> = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(context_window, 272000) FROM provider_models WHERE model_name = ? COLLATE NOCASE AND enabled = 1 LIMIT 1",
         )
         .bind(&body.model)
         .fetch_optional(pool)
         .await
         .ok()
-        .flatten()
-        .unwrap_or(272000) as u64
+        .flatten();
+        if ctx.is_none() {
+            if let Some((provider_name, model_name)) = body.model.split_once('/') {
+                ctx = sqlx::query_scalar::<_, i64>(
+                    "SELECT COALESCE(pm.context_window, 272000)
+                     FROM provider_models pm
+                     JOIN providers p ON p.id = pm.provider_id
+                     WHERE pm.model_name = ? COLLATE NOCASE AND p.name = ? COLLATE NOCASE
+                       AND pm.enabled = 1 AND p.enabled = 1
+                     LIMIT 1",
+                )
+                .bind(model_name)
+                .bind(provider_name)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+            }
+        }
+        ctx.unwrap_or(272000) as u64
     };
 
     // Resolve API key: all apps use the proxy auth key for authentication against the proxy.

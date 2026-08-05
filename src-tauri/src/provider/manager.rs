@@ -156,7 +156,53 @@ impl ProviderManager {
     /// that has the model). When provided, the search is restricted to that
     /// provider's `provider_models` rows — this is essential for the test-model
     /// flow where the user explicitly picked a provider to test against.
+    ///
+    /// When `provider_id` is `None`, the `provider_name/model_name` form is also
+    /// supported: if the exact model name is not found and the string contains
+    /// `/`, it is split at the FIRST slash into `(provider_name, model_name)`
+    /// and resolved against that provider only. Exact model-name matching takes
+    /// priority so literal model names that themselves contain `/` (e.g.
+    /// `qwen/qwen3.6-27b`) keep working unchanged.
     pub async fn find_for_model_on_provider(
+        model: &str,
+        provider_id: Option<&str>,
+    ) -> Result<ResolvedRoute, crate::error::ProxyError> {
+        if let Some(pid) = provider_id {
+            return Self::resolve_in_provider(model, Some(pid)).await;
+        }
+
+        // provider_id is None: try the whole string as a model name first.
+        match Self::resolve_in_provider(model, None).await {
+            Ok(route) => return Ok(route),
+            Err(_) => {}
+        }
+
+        // Fall back to "provider_name/model_name" (split at the FIRST slash).
+        if let Some((provider_name, model_name)) = model.split_once('/') {
+            let pool = get_pool().await;
+            let provider_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM providers WHERE name = ? COLLATE NOCASE AND enabled = 1 LIMIT 1",
+            )
+            .bind(provider_name)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| crate::error::ProxyError::Database(e))?;
+            if let Some(pid) = provider_id {
+                if let Ok(route) = Self::resolve_in_provider(model_name, Some(&pid)).await {
+                    return Ok(route);
+                }
+            }
+        }
+
+        Err(crate::error::ProxyError::Routing(format!(
+            "no provider found for model '{}'",
+            model
+        )))
+    }
+
+    /// The core query: resolve `model` within `provider_id` (None = any enabled
+    /// provider). Returns the concrete route if exactly one row matches.
+    async fn resolve_in_provider(
         model: &str,
         provider_id: Option<&str>,
     ) -> Result<ResolvedRoute, crate::error::ProxyError> {
@@ -209,13 +255,20 @@ impl ProviderManager {
         .await
         .map_err(|e| crate::error::ProxyError::Database(e))?;
 
-        let target_model = matched
-            .target_model
-            .clone()
-            .unwrap_or_else(|| matched.model_name.clone());
+        // Empty string is treated the same as NULL: fall back to the literal
+        // model name. (Dev DBs can carry '' instead of NULL after a restore;
+        // sending an empty `model` upstream breaks providers like lmstudio.)
+        let target_model = match matched.target_model.as_deref() {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => matched.model_name.clone(),
+        };
         let target_format = parse_client_format(&provider.format)?;
+        // Empty-string endpoint_path is treated as unset (restores can leave ''
+        // instead of NULL) so the default per-format path is used; otherwise
+        // `format!("/{}", "")` would produce "/" and 404 on the upstream.
         let endpoint_path = provider
             .endpoint_path
+            .filter(|p| !p.is_empty())
             .map(|p| {
                 if p.starts_with('/') {
                     p
