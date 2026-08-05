@@ -1,5 +1,6 @@
 use ai_proxy_lib::backup::export::export_bundle_with_passphrase;
 use ai_proxy_lib::backup::import::import_bundle;
+use base64::Engine;
 use sqlx::{Row, SqlitePool};
 
 /// Run the full migration chain (001..025) so the schema matches production.
@@ -226,6 +227,52 @@ async fn apply_all_migrations(pool: &SqlitePool) {
             .await
             .unwrap();
     }
+
+    // 026: per-model capability columns (guarded, multi-statement).
+    if !pragma_has_column(pool, "provider_models", "supports_thinking").await {
+        let m26 = include_str!("../migrations/026_model_capabilities.sql");
+        let stripped: String = m26
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await.unwrap();
+            }
+        }
+    }
+
+    // 027: repair NULL→'' corruption in nullable INTEGER columns (guarded).
+    if has_bad_nullable_int(pool).await {
+        let m27 = include_str!("../migrations/027_repair_nullable_int_columns.sql");
+        let stripped: String = m27
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await.unwrap();
+            }
+        }
+    }
+}
+
+/// `SELECT COUNT(*) > 0 FROM provider_models WHERE typeof(max_output_tokens)='text'
+/// OR typeof(context_window)='text'`.
+async fn has_bad_nullable_int(pool: &SqlitePool) -> bool {
+    let row = sqlx::query(
+        "SELECT COUNT(*) > 0 FROM provider_models \
+         WHERE typeof(max_output_tokens) = 'text' OR typeof(context_window) = 'text'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let v: i64 = row.get(0);
+    v != 0
 }
 
 /// `SELECT COUNT(*) > 0 FROM pragma_table_info('tbl') WHERE name = 'col'`.
@@ -406,4 +453,177 @@ async fn test_import_wrong_passphrase_does_not_mutate() {
         .await
         .unwrap();
     assert_eq!(count.0, 1);
+}
+
+/// Regression: NULL in a nullable INTEGER column (`max_output_tokens`) must
+/// survive export → import as NULL, not be silently rewritten to TEXT `''`.
+/// The old export wrote `""` for NULL, import re-bound it as TEXT, and sqlx
+/// then failed to decode it as `Option<i64>` ("mismatched types").
+#[tokio::test]
+async fn test_roundtrip_preserves_null_in_integer_column() {
+    let pool = setup_pool().await;
+    // Provider + model with default (NULL) max_output_tokens — the permissive default.
+    let (enc, nonce) = ai_proxy_lib::key::store::encrypt_api_key("sk-test").unwrap();
+    sqlx::query(
+        "INSERT INTO providers (id, name, base_url, format, endpoint_path, upstream_user_agent, enabled) VALUES ('p2','Test2','https://x','responses','/v1','',1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO provider_models (id, provider_id, model_name, target_model, enabled, context_window) VALUES ('m2','p2','gpt-4','gpt-4',1,128000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO api_keys (id, provider_id, label, encrypted_key, nonce) VALUES ('k2','p2','main',?1,?2)")
+        .bind(&enc[..])
+        .bind(&nonce[..])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Confirm the fixture starts NULL.
+    let before: (Option<i64>,) =
+        sqlx::query_as("SELECT max_output_tokens FROM provider_models WHERE id='m2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before.0, None);
+
+    let bytes = export_bundle_with_passphrase(&pool, "pw123").await.unwrap();
+    sqlx::query("DELETE FROM providers")
+        .execute(&pool)
+        .await
+        .unwrap();
+    import_bundle(&pool, &bytes, Some("pw123")).await.unwrap();
+
+    // After import the value must still decode as NULL (not TEXT '').
+    let after: (Option<i64>,) =
+        sqlx::query_as("SELECT max_output_tokens FROM provider_models WHERE id='m2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after.0, None, "max_output_tokens must round-trip as NULL");
+
+    // Storage class sanity: the column must hold NULL, not an empty string.
+    let ty: String =
+        sqlx::query_scalar("SELECT typeof(max_output_tokens) FROM provider_models WHERE id='m2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ty, "null", "storage class should be null, got {ty}");
+}
+
+/// Migration 027 must repair databases that were already corrupted by the old
+/// export (NULL flattened to TEXT ''). This mirrors a dev/prod DB that imported
+/// a pre-fix backup bundle.
+#[tokio::test]
+async fn test_migration_027_repairs_corrupted_text_values() {
+    let pool = setup_pool().await;
+    // Simulate the corruption: TEXT '' stored in the nullable INTEGER column.
+    sqlx::query("UPDATE provider_models SET max_output_tokens = '' WHERE id = 'm1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before: String =
+        sqlx::query_scalar("SELECT typeof(max_output_tokens) FROM provider_models WHERE id = 'm1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, "text");
+
+    assert!(has_bad_nullable_int(&pool).await);
+
+    // Apply migration 027 exactly as init.rs does.
+    let m27 = include_str!("../migrations/027_repair_nullable_int_columns.sql");
+    let stripped: String = m27
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for stmt in stripped.split(';') {
+        let trimmed = stmt.trim();
+        if !trimmed.is_empty() {
+            sqlx::query(trimmed).execute(&pool).await.unwrap();
+        }
+    }
+
+    let after: Option<i64> =
+        sqlx::query_scalar("SELECT max_output_tokens FROM provider_models WHERE id = 'm1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, None, "corrupted TEXT must be repaired back to NULL");
+    assert!(!has_bad_nullable_int(&pool).await);
+}
+
+/// Regression: `store_passphrase` must INSERT when the `backup_passphrase`
+/// settings row is absent (e.g. after a restore strips machine-bound secrets,
+/// or migration 025 was skipped). A plain UPDATE would affect 0 rows and the
+/// UI would keep showing "口令未设置".
+#[tokio::test]
+async fn test_store_passphrase_creates_missing_row() {
+    let pool = setup_pool().await;
+    sqlx::query("DELETE FROM settings WHERE key = 'backup_passphrase'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    ai_proxy_lib::backup::export::store_passphrase(&pool, "correct horse battery staple")
+        .await
+        .unwrap();
+
+    // Row must now exist and decrypt back to the same passphrase.
+    let (stored,): (String,) =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'backup_passphrase'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let parts: Vec<&str> = stored.splitn(2, ':').collect();
+    assert_eq!(parts.len(), 2, "stored format must be nonce_b64:ct_b64");
+    let nonce: Vec<u8> = base64::engine::general_purpose::STANDARD
+        .decode(parts[0])
+        .unwrap();
+    let ct: Vec<u8> = base64::engine::general_purpose::STANDARD
+        .decode(parts[1])
+        .unwrap();
+    let nonce_arr: [u8; 12] = nonce.as_slice().try_into().unwrap();
+    let plain = ai_proxy_lib::key::store::decrypt_api_key(&ct, &nonce_arr).unwrap();
+    assert_eq!(plain, "correct horse battery staple");
+}
+
+/// Storing a new passphrase over an existing row must update (not duplicate).
+#[tokio::test]
+async fn test_store_passphrase_updates_existing_row() {
+    let pool = setup_pool().await;
+    ai_proxy_lib::backup::export::store_passphrase(&pool, "first-passphrase")
+        .await
+        .unwrap();
+    ai_proxy_lib::backup::export::store_passphrase(&pool, "second-passphrase")
+        .await
+        .unwrap();
+
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM settings WHERE key = 'backup_passphrase'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "UPSERT must not create a duplicate row");
+
+    let (stored,): (String,) =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'backup_passphrase'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let parts: Vec<&str> = stored.splitn(2, ':').collect();
+    let nonce: Vec<u8> = base64::engine::general_purpose::STANDARD
+        .decode(parts[0])
+        .unwrap();
+    let ct: Vec<u8> = base64::engine::general_purpose::STANDARD
+        .decode(parts[1])
+        .unwrap();
+    let nonce_arr: [u8; 12] = nonce.as_slice().try_into().unwrap();
+    let plain = ai_proxy_lib::key::store::decrypt_api_key(&ct, &nonce_arr).unwrap();
+    assert_eq!(plain, "second-passphrase", "value must be updated in place");
 }

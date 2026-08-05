@@ -162,10 +162,13 @@ pub async fn handle_anthropic_count_tokens(request: Request) -> Response {
     info!("[count_tokens] Upstream: POST {}", url);
 
     let http_client = crate::http::SHARED_HTTP_CLIENT.clone();
+    // NOTE: `.json()` already sets `Content-Type: application/json`; adding it
+    // again via `.header()` appends a SECOND value, which strict upstreams
+    // (e.g. opencode-go) reject with 415 "Unsupported content-type:
+    // application/json, application/json".
     let mut req_builder = http_client
         .post(&url)
         .json(&forward_body)
-        .header("Content-Type", "application/json")
         .header("x-api-key", &api_key)
         .header("anthropic-version", "2023-06-01")
         .timeout(std::time::Duration::from_secs(300));
@@ -862,10 +865,11 @@ pub(crate) async fn handle_proxy_inner(
         let fmt = target_format_clone.clone();
         let key_owned = key.to_string();
         async move {
-            let mut b = client
-                .post(&url)
-                .json(&body)
-                .header("Content-Type", "application/json");
+            // NOTE: `.json()` already sets `Content-Type: application/json`;
+            // adding it again appends a SECOND value which strict upstreams
+            // (e.g. opencode-go) reject with 415 "Unsupported content-type:
+            // application/json, application/json".
+            let mut b = client.post(&url).json(&body);
             if is_stream_for_timeout {
                 // 流式请求不设短超时。连接阶段已由共享客户端的
                 // connect_timeout(30s) 保障快速失败；流式 body 可能持续数分钟

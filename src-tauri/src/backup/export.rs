@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use sqlx::{Column, Row, SqlitePool};
+use sqlx::{Column, Row, SqlitePool, ValueRef};
 
 use super::bundle::{BackupBundle, BackupData, KdfParams};
 use super::crypto::{derive_key, generate_salt, passphrase_encrypt};
@@ -111,23 +111,25 @@ fn row_to_json(row: &sqlx::sqlite::SqliteRow, blob_cols: &[&str]) -> serde_json:
             map.insert(name.into(), serde_json::Value::String(B64.encode(&bytes)));
             continue;
         }
-        // Try TEXT first.
-        if let Ok(val) = row.try_get::<Option<String>, _>(name) {
-            map.insert(
-                name.into(),
-                serde_json::Value::String(val.unwrap_or_default()),
-            );
-        } else if let Ok(val) = row.try_get::<Option<i64>, _>(name) {
+        // Preserve NULL as JSON `null`. The old code tried Option<String> first
+        // and flattened NULL to "" via unwrap_or_default(), which made import
+        // bind an empty string into INTEGER columns (TEXT ''), breaking sqlx
+        // decode of Option<i64>. Emitting null lets import bind a real NULL.
+        if row.try_get_raw(name).map(|r| r.is_null()).unwrap_or(false) {
+            map.insert(name.into(), serde_json::Value::Null);
+            continue;
+        }
+        // Non-NULL values: try TEXT, then INTEGER, then REAL, then BLOB.
+        if let Ok(val) = row.try_get::<String, _>(name) {
+            map.insert(name.into(), serde_json::Value::String(val));
+        } else if let Ok(val) = row.try_get::<i64, _>(name) {
             map.insert(name.into(), json!(val));
-        } else if let Ok(val) = row.try_get::<Option<f64>, _>(name) {
+        } else if let Ok(val) = row.try_get::<f64, _>(name) {
             map.insert(name.into(), json!(val));
-        } else if let Ok(val) = row.try_get::<Option<Vec<u8>>, _>(name) {
-            map.insert(
-                name.into(),
-                serde_json::Value::String(B64.encode(&val.unwrap_or_default())),
-            );
+        } else if let Ok(val) = row.try_get::<Vec<u8>, _>(name) {
+            map.insert(name.into(), serde_json::Value::String(B64.encode(&val)));
         } else {
-            // NULL or undecodable → null.
+            // Unreachable for non-NULL values; keep a safe fallback.
             map.insert(name.into(), serde_json::Value::Null);
         }
     }
@@ -250,11 +252,18 @@ pub(crate) async fn read_stored_passphrase(pool: &SqlitePool) -> BackupResult<St
 }
 
 /// Persist a passphrase, master-key-encrypted, as "nonce_b64:ct_b64".
+///
+/// Uses an UPSERT: the `backup_passphrase` settings row can be absent (e.g.
+/// after a restore, which strips machine-bound secrets, or on installs where
+/// migration 025 was skipped because `sync_webdav_url` already existed). A plain
+/// UPDATE would silently affect 0 rows and the status would stay "未设置".
 pub async fn store_passphrase(pool: &SqlitePool, passphrase: &str) -> BackupResult<()> {
     let (ct, nonce) = encrypt_api_key(passphrase).map_err(|e| BackupError::Other(e.to_string()))?;
     let stored = format!("{}:{}", B64.encode(nonce), B64.encode(ct));
     sqlx::query(
-        "UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = 'backup_passphrase'",
+        "INSERT INTO settings (key, value, updated_at) \
+         VALUES ('backup_passphrase', ?, datetime('now')) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
     )
     .bind(&stored)
     .execute(pool)

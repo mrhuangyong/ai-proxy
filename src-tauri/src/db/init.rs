@@ -368,6 +368,34 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 026: model capabilities");
     }
 
+    // Migration 027: repair backups that flattened NULL → "" in nullable INTEGER
+    // columns (e.g. provider_models.max_output_tokens), which broke Option<i64>
+    // decoding with "mismatched types ... TEXT". Runs whenever corrupted TEXT
+    // values are still present; the UPDATE is idempotent.
+    let has_bad_nullable_int: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM provider_models \
+         WHERE typeof(max_output_tokens) = 'text' OR typeof(context_window) = 'text'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if has_bad_nullable_int {
+        let migration27 = include_str!("../../migrations/027_repair_nullable_int_columns.sql");
+        let stripped: String = migration27
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await?;
+            }
+        }
+        info!("Applied migration 027: repair NULL→'' in nullable INTEGER columns");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

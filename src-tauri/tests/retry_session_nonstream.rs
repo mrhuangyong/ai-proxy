@@ -189,3 +189,37 @@ async fn non_stream_anthropic_json_returns_completed_buffer() {
         other => panic!("expected CompletedBuffer, got {:?}", other),
     }
 }
+
+/// Regression: the proxy must send exactly ONE `Content-Type` header upstream.
+/// `reqwest::RequestBuilder::json()` already sets it; a redundant
+/// `.header("Content-Type", "application/json")` APPENDS a second value, which
+/// strict upstreams (e.g. opencode-go) reject with 415 "Unsupported
+/// content-type: application/json, application/json". This mirrors the exact
+/// builder chain used in `handlers.rs` / `api.rs`.
+#[tokio::test]
+async fn upstream_request_has_single_content_type() {
+    let body = serde_json::json!({
+        "model": "deepseek-v4-flash",
+        "temperature": 0.8,
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let client = reqwest::Client::new();
+    let req = client
+        .post("https://example.com/v1/chat/completions")
+        .json(&body)
+        .build()
+        .unwrap();
+
+    let cts: Vec<_> = req
+        .headers()
+        .get_all("content-type")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert_eq!(
+        cts,
+        vec!["application/json"],
+        "must send a single Content-Type header, got {cts:?}"
+    );
+}

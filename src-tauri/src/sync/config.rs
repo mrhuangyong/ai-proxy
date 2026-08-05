@@ -104,23 +104,38 @@ pub async fn save_config(pool: &SqlitePool, cfg: &SyncConfig) -> SyncResult<()> 
         updates.push(("sync_webdav_password", stored));
     }
     for (k, v) in updates {
-        sqlx::query("UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = ?")
-            .bind(v)
-            .bind(k)
-            .execute(pool)
-            .await?;
+        // UPSERT: the row may be absent (restore strips machine-bound secrets).
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+        )
+        .bind(v)
+        .bind(k)
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
 
 pub async fn update_sync_status(pool: &SqlitePool, status: &str, error: &str) -> SyncResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query("UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = 'sync_last_upload_at'")
-        .bind(&now).execute(pool).await?;
-    sqlx::query("UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = 'sync_last_upload_status'")
-        .bind(status).execute(pool).await?;
     sqlx::query(
-        "UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = 'sync_last_error'",
+        "INSERT INTO settings (key, value, updated_at) VALUES ('sync_last_upload_at', ?, datetime('now')) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+    )
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES ('sync_last_upload_status', ?, datetime('now')) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+    )
+    .bind(status)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES ('sync_last_error', ?, datetime('now')) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
     )
     .bind(error)
     .execute(pool)
