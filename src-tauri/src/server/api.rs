@@ -1229,10 +1229,9 @@ async fn test_model(
         .build()
         .unwrap_or_default();
 
-    let mut req_builder = http_client
-        .post(&url)
-        .json(&target_body)
-        .header("Content-Type", "application/json");
+    // NOTE: `.json()` already sets `Content-Type: application/json`; adding it
+    // again appends a SECOND value which strict upstreams reject with 415.
+    let mut req_builder = http_client.post(&url).json(&target_body);
 
     // Inject custom upstream User-Agent so the test request honors the same UA config
     // (provider override > global > none).

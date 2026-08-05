@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 use super::bundle::BackupBundle;
 use super::crypto::{derive_key, passphrase_decrypt};
@@ -44,6 +45,7 @@ pub async fn import_bundle(
     // 2. Transactional DELETE + INSERT per table. Atomicity is guaranteed by the
     // transaction — the old `write_pre_restore_snapshot` was a no-op that lied
     // about saving a snapshot (it computed a bundle then discarded it).
+    let int_cols = integer_columns(pool).await?;
     let mut tx = pool.begin().await?;
     for (table, rows) in [
         ("providers", &data.providers),
@@ -62,11 +64,48 @@ pub async fn import_bundle(
             .execute(&mut *tx)
             .await?;
         for row in rows {
-            insert_row(&mut tx, table, row).await?;
+            insert_row(&mut tx, table, row, &int_cols).await?;
         }
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// Column names whose declared type is INTEGER for each backed-up table.
+///
+/// Used to undo the legacy export corruption where NULL was flattened to `""`:
+/// an empty string bound into an INTEGER column is stored as TEXT `''` (SQLite
+/// only converts numeric-looking text), which later breaks `Option<i64>` decode.
+/// Tables/columns are hardcoded constants from the import list, not user input.
+async fn integer_columns(pool: &SqlitePool) -> BackupResult<HashMap<&'static str, Vec<String>>> {
+    let tables = [
+        "providers",
+        "provider_models",
+        "api_keys",
+        "interceptor_rules",
+        "virtual_models",
+        "virtual_model_mappings",
+        "mcp_servers",
+        "mcp_app_bindings",
+        "app_configs",
+        "users",
+        "settings",
+    ];
+    let mut out = HashMap::new();
+    for table in tables {
+        let cols = sqlx::query(&format!("PRAGMA table_info({})", table))
+            .fetch_all(pool)
+            .await?;
+        let mut ints = Vec::new();
+        for col in &cols {
+            let ty: String = col.try_get("type").unwrap_or_default();
+            if ty.to_ascii_uppercase() == "INTEGER" {
+                ints.push(col.try_get::<String, _>("name")?);
+            }
+        }
+        out.insert(table, ints);
+    }
+    Ok(out)
 }
 
 /// Schema knowledge: which (table, column) pairs are BLOB. Only api_keys has
@@ -83,6 +122,7 @@ async fn insert_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     table: &str,
     row: &serde_json::Value,
+    int_cols: &HashMap<&'static str, Vec<String>>,
 ) -> BackupResult<()> {
     let obj = row.as_object().ok_or(BackupError::InvalidFormat)?;
     let cols: Vec<&String> = obj.keys().collect();
@@ -96,6 +136,7 @@ async fn insert_row(
             .join(","),
         placeholders.join(",")
     );
+    let ints = int_cols.get(table).cloned().unwrap_or_default();
     let mut q = sqlx::query(&sql);
     for c in &cols {
         let v = &obj[*c];
@@ -123,7 +164,15 @@ async fn insert_row(
         } else if let Some(b) = v.as_bool() {
             q = q.bind(b);
         } else if let Some(s) = v.as_str() {
-            q = q.bind(s);
+            // Legacy bundles flattened NULL to ""; for INTEGER columns bind that
+            // as NULL so the column keeps integer affinity ("" would be stored
+            // as TEXT and break Option<i64> decoding). Non-empty strings in
+            // INTEGER columns are left as-is (SQLite applies affinity).
+            if s.is_empty() && ints.iter().any(|ic| ic == *c) {
+                q = q.bind(None::<String>);
+            } else {
+                q = q.bind(s);
+            }
         } else {
             // Fallback: bind the JSON stringification (numbers already handled
             // above; this catches objects/arrays which shouldn't appear in a row).
