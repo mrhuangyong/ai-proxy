@@ -1235,7 +1235,7 @@ async fn test_model(
         }],
         tools: None,
         tool_choice: None,
-        temperature: Some(0.0),
+        temperature: None,
         top_p: None,
         top_k: None,
         max_tokens: Some(32),
