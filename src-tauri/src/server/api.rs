@@ -56,14 +56,16 @@ pub fn err_json(msg: impl Into<String>) -> Json<ApiError> {
     })
 }
 
-/// Validate a provider name. Rules: only ASCII letters and digits, must start
-/// with a letter, no spaces or special characters. This keeps
+/// Validate a provider name. Rules: ASCII letters/digits plus `-`/`_`, must
+/// start with a letter, no spaces or other special characters. This keeps
 /// `provider_name/model_name` unambiguous (split on the first `/`).
 fn validate_provider_name(name: &str) -> Result<(), Json<ApiError>> {
     let ok = name.len() >= 1
         && name
             .chars()
-            .all(|c| c.is_ascii_alphabetic() || c.is_ascii_digit())
+            .all(|c| {
+                c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '-' || c == '_'
+            })
         && name
             .chars()
             .next()
@@ -73,7 +75,7 @@ fn validate_provider_name(name: &str) -> Result<(), Json<ApiError>> {
         Ok(())
     } else {
         Err(err_json(
-            "供应商名称仅支持英文字母与数字，必须以字母开头，不能包含空格或特殊字符",
+            "供应商名称仅支持英文字母、数字、- 与 _，必须以字母开头",
         ))
     }
 }
@@ -1235,7 +1237,7 @@ async fn test_model(
         }],
         tools: None,
         tool_choice: None,
-        temperature: Some(0.0),
+        temperature: None,
         top_p: None,
         top_k: None,
         max_tokens: Some(32),

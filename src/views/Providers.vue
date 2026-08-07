@@ -80,8 +80,8 @@
         <n-form-item label="名称" required>
           <n-input v-model:value="form.name" placeholder="例如: opencode" :input-props="{ autocapitalize: 'off' }" />
           <template #feedback>
-            <n-text v-if="form.name && !/^[A-Za-z][A-Za-z0-9]*$/.test(form.name)" type="error" style="font-size: 12px">
-              仅支持英文字母与数字，必须以字母开头
+            <n-text v-if="form.name && !/^[A-Za-z][A-Za-z0-9_-]*$/.test(form.name)" type="error" style="font-size: 12px">
+              仅支持英文字母、数字、- 与 _，必须以字母开头
             </n-text>
           </template>
         </n-form-item>
@@ -479,9 +479,9 @@ async function handleSubmit() {
     message.warning('请填写必填字段')
     return false
   }
-  const nameValid = /^[A-Za-z][A-Za-z0-9]*$/.test(form.value.name)
+  const nameValid = /^[A-Za-z][A-Za-z0-9_-]*$/.test(form.value.name)
   if (!nameValid) {
-    message.error('供应商名称仅支持英文字母与数字，必须以字母开头，不能包含空格或特殊字符')
+    message.error('供应商名称仅支持英文字母、数字、- 与 _，必须以字母开头')
     return false
   }
   const dup = providers.value.find(
