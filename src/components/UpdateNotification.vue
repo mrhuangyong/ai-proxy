@@ -70,6 +70,7 @@ import { useMessage } from 'naive-ui'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { isTauri } from '../utils/env'
+import { formatDateTime } from '../utils/format'
 
 interface UpdateInfo {
   version: string
@@ -168,11 +169,7 @@ async function handleInstall() {
 }
 
 function formatDate(dateStr: string): string {
-  try {
-    return new Date(dateStr).toLocaleDateString('zh-CN')
-  } catch {
-    return dateStr
-  }
+  return formatDateTime(dateStr).slice(0, 10)
 }
 
 function formatBytes(bytes: number): string {

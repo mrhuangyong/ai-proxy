@@ -76,6 +76,19 @@ pub async fn run_upload(
         Utc::now().format("%Y-%m-%dT%H-%M-%SZ")
     );
     client.upload(&filename, &bytes).await?;
+    if cfg.retention_count > 0 {
+        match client.prune(cfg.retention_count as usize).await {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(
+                    "pruned {} old backup(s), keeping {}",
+                    removed.len(),
+                    cfg.retention_count
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("backup prune failed: {}", e),
+        }
+    }
     update_sync_status(pool, "success", "").await?;
     Ok(())
 }

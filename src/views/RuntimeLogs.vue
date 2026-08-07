@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, nextTick, computed, watch } from 'vue'
 import { NTag, NButton, NButtonGroup, NSpace, NSwitch, NIcon, NEmpty } from 'naive-ui'
 import { PauseOutline, PlayOutline, TrashOutline } from '@vicons/ionicons5'
 import { api, getBaseUrl } from '../api'
+import { formatDateTime } from '../utils/format'
 
 const MAX_DISPLAY_LEN = 2000
 
@@ -113,10 +114,7 @@ function connectWs() {
 }
 
 function formatTimestamp(ts: string): string {
-  const d = new Date(ts)
-  if (isNaN(d.getTime())) return ts.replace('T', ' ').replace(/[Z+].*/, '')
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return formatDateTime(ts)
 }
 
 function messageColor(level: string): string {

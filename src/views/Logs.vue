@@ -63,6 +63,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h } from 'vue'
 import { api } from '../api'
+import { formatDateTime } from '../utils/format'
 import { NTag, NSpace, NTooltip, NModal, NTabs, NTabPane, useDialog, useMessage } from 'naive-ui'
 import type { RequestLog } from '../types'
 
@@ -134,16 +135,7 @@ function statusCodeColor(code: number): 'success' | 'warning' | 'error' {
 }
 
 function formatUtcTime(utcStr: string): string {
-  const date = new Date(utcStr + 'Z')
-  return date.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).replace(/\//g, '-')
+  return formatDateTime(utcStr, { utc: true })
 }
 
 function formatNumber(n: number): string {

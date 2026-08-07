@@ -175,6 +175,10 @@
           <n-form-item label="远程目录">
             <n-input v-model:value="syncCfg.webdav_path" placeholder="ai-proxy-backups/" />
           </n-form-item>
+          <n-form-item label="保留数量">
+            <n-input-number v-model:value="syncCfg.retention_count" :min="1" :max="999" style="width: 100%" />
+            <n-text depth="3" style="font-size: 13px; margin-left: 8px">超过该数量的旧备份自动清理</n-text>
+          </n-form-item>
         </n-form>
 
         <n-space>
@@ -200,7 +204,7 @@
 
         <n-divider />
         <n-text depth="3">
-          上次同步: {{ syncLast.last_upload_at || '从未' }}
+          上次同步: {{ syncLast.last_upload_at ? formatDateTime(syncLast.last_upload_at) : '从未' }}
           {{ syncLast.last_upload_status === 'success' ? '✅成功' : syncLast.last_error ? '❌' + syncLast.last_error : '' }}
         </n-text>
         <n-space>
@@ -293,13 +297,24 @@
     </n-modal>
 
     <!-- 版本管理弹窗 -->
-    <n-modal v-model:show="showVersions" preset="card" title="远程备份版本" style="width: 720px; max-width: 90vw">
+    <n-modal v-model:show="showVersions" preset="card" title="远程备份版本" style="width: 760px; max-width: 92vw">
+      <n-space justify="space-between" align="center" style="margin-bottom: 12px">
+        <n-text depth="3">共 {{ remoteVersions.length }} 条 · 保留数量 {{ syncCfg.retention_count || 10 }} 条</n-text>
+        <n-button size="small" :loading="pruning" @click="pruneNow">
+          {{ syncCfg.retention_count > 0 ? '立即清理' : '清理' }}
+        </n-button>
+      </n-space>
       <n-data-table
         :columns="[
-          { title: '文件名', key: 'filename' },
-          { title: '大小', key: 'size', render: (row: any) => (row.size / 1024).toFixed(1) + ' KB' },
-          { title: '修改时间', key: 'modified_at' },
-          { title: '操作', key: 'actions', render: (row: any) => h(NSpace, null, {
+          {
+            title: '文件名',
+            key: 'filename',
+            minWidth: 300,
+            ellipsis: { tooltip: true },
+          },
+          { title: '大小', key: 'size', width: 90, render: (row: any) => (row.size / 1024).toFixed(1) + ' KB' },
+          { title: '修改时间', key: 'modified_at', width: 170, render: (row: any) => formatDateTime(row.modified_at) },
+          { title: '操作', key: 'actions', width: 140, render: (row: any) => h(NSpace, null, {
               default: () => [
                 h(NButton, { size: 'small', onClick: () => startRemoteRestore(row.filename) }, { default: () => '恢复' }),
                 h(NPopconfirm, { onPositiveClick: () => deleteVersion(row.filename) }, {
@@ -313,6 +328,7 @@
         :loading="versionsLoading"
         size="small"
         :bordered="false"
+        scroll-x="700"
       />
     </n-modal>
 
@@ -328,6 +344,7 @@ import { getVersion } from '@tauri-apps/api/app'
 import { save as saveDialog, open as openDialog } from '@tauri-apps/plugin-dialog'
 import { isTauri } from '../utils/env'
 import { writeTextFile, readTextFile } from '../utils/tauri-fs'
+import { formatDateTime } from '../utils/format'
 import { api, refreshApiConfig, backupApi, syncApi } from '../api'
 import type { RemoteBackup, SyncConfigResponse } from '../api'
 import { useTheme } from '../theme/use-theme'
@@ -619,7 +636,7 @@ async function confirmImport() {
 // --- Sync ---
 const syncCfg = ref<SyncConfigResponse>({
   enabled: false, webdav_url: '', webdav_username: '', webdav_path: 'ai-proxy-backups/',
-  auto_enabled: false, auto_interval_minutes: 60, sync_on_change: false,
+  auto_enabled: false, auto_interval_minutes: 60, sync_on_change: false, retention_count: 10,
 })
 const syncPassword = ref('')
 const syncLast = ref({ last_upload_at: '', last_upload_status: '', last_error: '' })
@@ -631,6 +648,7 @@ const testResult = ref<{ success: boolean; error?: string } | null>(null)
 async function loadSyncConfig() {
   try {
     syncCfg.value = await syncApi.getConfig()
+    syncPassword.value = syncCfg.value.webdav_password || ''
     const last = await syncApi.getLast()
     syncLast.value = last
   } catch (e) { /* ignore */ }
@@ -647,9 +665,11 @@ async function saveSyncConfig() {
       auto_enabled: syncCfg.value.auto_enabled,
       auto_interval_minutes: syncCfg.value.auto_interval_minutes,
       sync_on_change: syncCfg.value.sync_on_change,
+      retention_count: syncCfg.value.retention_count || 10,
     })
     message.success('同步配置已保存')
     syncPassword.value = ''
+    await loadSyncConfig()
   } catch (e: any) { message.error(e.message || '保存失败') }
 }
 
@@ -672,6 +692,17 @@ async function uploadNow() {
 }
 
 const versionsLoading = ref(false)
+const pruning = ref(false)
+
+async function pruneNow() {
+  pruning.value = true
+  try {
+    const r = await syncApi.prune()
+    message.success(`已清理 ${r.removed} 条旧备份，剩余 ${r.remaining} 条`)
+    await loadVersions()
+  } catch (e: any) { message.error(e.message || '清理失败') }
+  finally { pruning.value = false }
+}
 
 async function loadVersions() {
   showVersions.value = true

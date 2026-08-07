@@ -261,6 +261,17 @@ impl WebDavClient {
         Ok(())
     }
 
+    /// Delete the oldest backups beyond `keep`, keeping the newest `keep` files.
+    /// Returns the filenames that were removed.
+    pub async fn prune(&self, keep: usize) -> SyncResult<Vec<String>> {
+        let versions = self.list_versions().await?;
+        let to_delete = select_to_prune(&versions, keep);
+        for v in &to_delete {
+            self.delete(v).await?;
+        }
+        Ok(to_delete)
+    }
+
     fn map_dav_error(status: reqwest::StatusCode) -> SyncResult<()> {
         match status.as_u16() {
             200..=299 => Ok(()),
@@ -370,6 +381,19 @@ fn local_name(name: &[u8]) -> String {
     s.rsplit(':').next().unwrap_or(s).to_string()
 }
 
+/// Given the versions list (already sorted newest-first by `parse_propfind`),
+/// return the filenames to delete so at most `keep` remain. `keep == 0` keeps
+/// everything (pruning disabled).
+pub fn select_to_prune(versions: &[RemoteBackup], keep: usize) -> Vec<String> {
+    if keep == 0 || versions.len() <= keep {
+        return Vec::new();
+    }
+    versions[keep..]
+        .iter()
+        .map(|v| v.filename.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +444,37 @@ mod tests {
             join_url("https://dav.example.com/dav/", ""),
             "https://dav.example.com/dav/"
         );
+    }
+
+    #[test]
+    fn test_select_to_prune_keeps_newest() {
+        let mk = |n| RemoteBackup {
+            filename: format!("ai-proxy-backup-2026-07-{n:02}T00-00-00Z.json"),
+            size: 1,
+            modified_at: String::new(),
+        };
+        let versions: Vec<RemoteBackup> = (1..=15).rev().map(mk).collect();
+        assert_eq!(
+            versions[0].filename,
+            "ai-proxy-backup-2026-07-15T00-00-00Z.json"
+        );
+
+        let to_delete = select_to_prune(&versions, 10);
+        assert_eq!(to_delete.len(), 5);
+        assert_eq!(to_delete[0], "ai-proxy-backup-2026-07-05T00-00-00Z.json");
+        assert_eq!(to_delete[4], "ai-proxy-backup-2026-07-01T00-00-00Z.json");
+    }
+
+    #[test]
+    fn test_select_to_prune_disabled_or_within_limit() {
+        let mk = |n| RemoteBackup {
+            filename: format!("f{n}"),
+            size: 1,
+            modified_at: String::new(),
+        };
+        let versions: Vec<RemoteBackup> = (1..=5).rev().map(mk).collect();
+        assert_eq!(select_to_prune(&versions, 10), Vec::<String>::new());
+        assert_eq!(select_to_prune(&versions, 5), Vec::<String>::new());
+        assert_eq!(select_to_prune(&versions, 0), Vec::<String>::new());
     }
 }
