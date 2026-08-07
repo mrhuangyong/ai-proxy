@@ -18,6 +18,8 @@ pub struct SyncConfig {
     pub auto_enabled: bool,
     pub auto_interval_minutes: u32,
     pub sync_on_change: bool,
+    /// Number of remote backups to keep; older ones are pruned after upload.
+    pub retention_count: u32,
 }
 
 impl Default for SyncConfig {
@@ -31,6 +33,7 @@ impl Default for SyncConfig {
             auto_enabled: false,
             auto_interval_minutes: 60,
             sync_on_change: false,
+            retention_count: 10,
         }
     }
 }
@@ -59,6 +62,7 @@ pub async fn load_config(pool: &SqlitePool) -> SyncResult<SyncConfig> {
         auto_enabled: get("sync_auto_enabled") == "true",
         auto_interval_minutes: get("sync_auto_interval_minutes").parse().unwrap_or(60),
         sync_on_change: get("sync_on_change") == "true",
+        retention_count: get("sync_retention_count").parse().unwrap_or(10),
     })
 }
 
@@ -95,6 +99,7 @@ pub async fn save_config(pool: &SqlitePool, cfg: &SyncConfig) -> SyncResult<()> 
                 "false".into()
             },
         ),
+        ("sync_retention_count", cfg.retention_count.to_string()),
     ];
     // Only update password if a new one is provided (non-empty).
     if !cfg.webdav_password.is_empty() {
@@ -109,8 +114,8 @@ pub async fn save_config(pool: &SqlitePool, cfg: &SyncConfig) -> SyncResult<()> 
             "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
         )
-        .bind(v)
         .bind(k)
+        .bind(v)
         .execute(pool)
         .await?;
     }

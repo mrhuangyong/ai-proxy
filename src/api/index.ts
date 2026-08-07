@@ -198,10 +198,12 @@ export interface SyncConfigResponse {
   enabled: boolean
   webdav_url: string
   webdav_username: string
+  webdav_password?: string
   webdav_path: string
   auto_enabled: boolean
   auto_interval_minutes: number
   sync_on_change: boolean
+  retention_count: number
 }
 
 export interface RemoteBackup {
@@ -242,9 +244,11 @@ export const syncApi = {
     auto_enabled: boolean
     auto_interval_minutes: number
     sync_on_change: boolean
+    retention_count: number
   }>) =>
     api('/api/sync/config', { method: 'PUT', body: JSON.stringify(cfg) }),
   testConnection: () => api<{ success: boolean; error?: string }>('/api/sync/test', { method: 'POST' }),
+  prune: () => api<{ removed: number; remaining: number }>('/api/sync/prune', { method: 'POST' }),
   upload: () => api<{ filename: string; size: number }>('/api/sync/upload', { method: 'POST' }),
   listVersions: () => api<RemoteBackup[]>('/api/sync/versions'),
   restore: (filename: string, passphrase?: string) =>

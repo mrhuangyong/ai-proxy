@@ -627,3 +627,51 @@ async fn test_store_passphrase_updates_existing_row() {
     let plain = ai_proxy_lib::key::store::decrypt_api_key(&ct, &nonce_arr).unwrap();
     assert_eq!(plain, "second-passphrase", "value must be updated in place");
 }
+
+/// save_config must round-trip every field (key/value order in the UPSERT),
+/// including the encrypted webdav password, so load_config returns them back.
+#[tokio::test]
+async fn test_sync_config_save_load_round_trip() {
+    let pool = setup_pool().await;
+
+    let mut cfg = ai_proxy_lib::sync::config::SyncConfig::default();
+    cfg.enabled = true;
+    cfg.webdav_url = "https://dav.example.com/dav".into();
+    cfg.webdav_username = "webdav-user".into();
+    cfg.webdav_password = "secret123".into();
+    cfg.webdav_path = "backups/".into();
+    cfg.auto_enabled = true;
+    cfg.auto_interval_minutes = 30;
+    cfg.sync_on_change = true;
+    cfg.retention_count = 20;
+
+    ai_proxy_lib::sync::config::save_config(&pool, &cfg)
+        .await
+        .unwrap();
+
+    let loaded = ai_proxy_lib::sync::config::load_config(&pool)
+        .await
+        .unwrap();
+    assert_eq!(loaded.enabled, true);
+    assert_eq!(loaded.webdav_url, "https://dav.example.com/dav");
+    assert_eq!(loaded.webdav_username, "webdav-user");
+    assert_eq!(
+        loaded.webdav_password, "secret123",
+        "password must be stored under key sync_webdav_password and decrypt on load"
+    );
+    assert_eq!(loaded.webdav_path, "backups/");
+    assert_eq!(loaded.auto_enabled, true);
+    assert_eq!(loaded.auto_interval_minutes, 30);
+    assert_eq!(loaded.sync_on_change, true);
+    assert_eq!(loaded.retention_count, 20);
+
+    let (stored,): (String,) =
+        sqlx::query_as("SELECT value FROM settings WHERE key = 'sync_webdav_password'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        stored.starts_with("sync_") == false,
+        "sync_webdav_password must NOT be stored key-swapped (key holds ciphertext)"
+    );
+}

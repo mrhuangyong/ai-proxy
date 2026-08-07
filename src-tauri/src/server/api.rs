@@ -1675,10 +1675,12 @@ struct SyncConfigResponse {
     enabled: bool,
     webdav_url: String,
     webdav_username: String,
+    webdav_password: String,
     webdav_path: String,
     auto_enabled: bool,
     auto_interval_minutes: u32,
     sync_on_change: bool,
+    retention_count: u32,
 }
 
 impl From<crate::sync::config::SyncConfig> for SyncConfigResponse {
@@ -1687,10 +1689,12 @@ impl From<crate::sync::config::SyncConfig> for SyncConfigResponse {
             enabled: c.enabled,
             webdav_url: c.webdav_url,
             webdav_username: c.webdav_username,
+            webdav_password: c.webdav_password,
             webdav_path: c.webdav_path,
             auto_enabled: c.auto_enabled,
             auto_interval_minutes: c.auto_interval_minutes,
             sync_on_change: c.sync_on_change,
+            retention_count: c.retention_count,
         }
     }
 }
@@ -1713,6 +1717,7 @@ struct UpdateSyncConfigBody {
     auto_enabled: Option<bool>,
     auto_interval_minutes: Option<u32>,
     sync_on_change: Option<bool>,
+    retention_count: Option<u32>,
 }
 
 async fn update_sync_config(
@@ -1746,9 +1751,27 @@ async fn update_sync_config(
     if let Some(v) = body.sync_on_change {
         cfg.sync_on_change = v;
     }
+    if let Some(v) = body.retention_count {
+        cfg.retention_count = v;
+    }
     crate::sync::config::save_config(pool, &cfg)
         .await
         .map_err(|e| err_json(e.to_string()))?;
+    // Enforce retention immediately: prune on save so the configured limit
+    // takes effect without waiting for the next upload. Best-effort.
+    if cfg.enabled && cfg.retention_count > 0 {
+        if let Ok(client) = crate::sync::webdav::WebDavClient::from_config(&cfg) {
+            if let Ok(removed) = client.prune(cfg.retention_count as usize).await {
+                if !removed.is_empty() {
+                    tracing::info!(
+                        "pruned {} old backup(s) on config save, keeping {}",
+                        removed.len(),
+                        cfg.retention_count
+                    );
+                }
+            }
+        }
+    }
     Ok(ok(()))
 }
 
@@ -1799,6 +1822,19 @@ async fn sync_upload() -> Result<Json<ApiResponse<UploadResult>>, Json<ApiError>
         .upload(&filename, &bytes)
         .await
         .map_err(|e| err_json(e.to_string()))?;
+    if cfg.retention_count > 0 {
+        match client.prune(cfg.retention_count as usize).await {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(
+                    "pruned {} old backup(s), keeping {}",
+                    removed.len(),
+                    cfg.retention_count
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("backup prune failed: {}", e),
+        }
+    }
     crate::sync::config::update_sync_status(pool, "success", "")
         .await
         .map_err(|e| err_json(e.to_string()))?;
@@ -1818,6 +1854,34 @@ async fn sync_versions(
         .await
         .map_err(|e| err_json(e.to_string()))?;
     Ok(ok(versions))
+}
+
+#[derive(Serialize)]
+struct PruneResult {
+    removed: usize,
+    remaining: usize,
+}
+
+async fn sync_prune() -> Result<Json<ApiResponse<PruneResult>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let cfg = crate::sync::config::load_config(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    let client = crate::sync::webdav::WebDavClient::from_config(&cfg)
+        .map_err(|e| err_json(e.to_string()))?;
+    let versions = client
+        .list_versions()
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    let keep = cfg.retention_count as usize;
+    let removed = client
+        .prune(keep)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(PruneResult {
+        removed: removed.len(),
+        remaining: versions.len().saturating_sub(removed.len()),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1961,6 +2025,7 @@ pub fn api_routes() -> axum::Router {
         )
         .route("/sync/test", axum::routing::post(test_sync_connection))
         .route("/sync/upload", axum::routing::post(sync_upload))
+        .route("/sync/prune", axum::routing::post(sync_prune))
         .route("/sync/versions", axum::routing::get(sync_versions))
         .route("/sync/restore", axum::routing::post(sync_restore))
         .route(

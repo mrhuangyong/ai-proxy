@@ -216,6 +216,7 @@ import { useRouter } from 'vue-router'
 import { SettingsOutline } from '@vicons/ionicons5'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
+import { formatDateTime } from '../utils/format'
 import type { AppConfig, AppType, Provider, ProviderModel, VirtualModel } from '../types'
 
 const message = useMessage()
@@ -261,7 +262,7 @@ function displayName(appType: AppType): string {
 }
 
 function formatTime(iso: string): string {
-  return new Date(iso).toLocaleString('zh-CN')
+  return formatDateTime(iso)
 }
 
 function isClaudeApp(appType: AppType): boolean {
