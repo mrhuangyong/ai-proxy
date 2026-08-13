@@ -250,12 +250,13 @@ async function handleSubmit() {
   text-transform: uppercase;
 }
 
-.field-input :deep(.n-input) {
+.field-input {
   background: #FFFFFF !important;
+  color-scheme: light;
 }
 
-.field-input :deep(.n-input .n-input__border),
-.field-input :deep(.n-input .n-input__state-border) {
+.field-input :deep(.n-input__border),
+.field-input :deep(.n-input__state-border) {
   border: 1px solid rgba(26, 26, 26, 0.1) !important;
   border-radius: 4px !important;
   box-shadow: none !important;
