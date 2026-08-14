@@ -145,6 +145,11 @@ impl FormatGenerator for GeminiGenerator {
             );
         }
         for (key, val) in &ir.extra {
+            // previous_response_id is a Responses-protocol session pointer,
+            // not a Gemini parameter; passing it through fails strict upstreams.
+            if key == "previous_response_id" {
+                continue;
+            }
             tracing::trace!("GeminiGenerator extra: {} = {}", key, val);
             body[key] = val.clone();
         }

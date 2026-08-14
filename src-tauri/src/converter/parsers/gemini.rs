@@ -12,7 +12,6 @@ pub struct GeminiParser;
 impl FormatParser for GeminiParser {
     fn parse_request(&self, body: &Value) -> Result<IrRequest, ProxyError> {
         let mut messages = Vec::new();
-
         if let Some(system_instruction) = body.get("systemInstruction") {
             let empty_parts = Vec::new();
             let parts = system_instruction["parts"]
@@ -47,8 +46,16 @@ impl FormatParser for GeminiParser {
             .as_array()
             .ok_or_else(|| ProxyError::Parse("missing 'contents' field".into()))?;
 
+        let mut tool_name_counter: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut tool_response_counter: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
         for content in contents {
-            messages.push(parse_gemini_content(content)?);
+            messages.extend(parse_gemini_content(
+                content,
+                &mut tool_name_counter,
+                &mut tool_response_counter,
+            )?);
         }
 
         let tools = body["tools"]
@@ -292,7 +299,11 @@ impl FormatParser for GeminiParser {
     }
 }
 
-fn parse_gemini_content(content: &Value) -> Result<IrMessage, ProxyError> {
+fn parse_gemini_content(
+    content: &Value,
+    tool_name_counter: &mut std::collections::HashMap<String, u32>,
+    tool_response_counter: &mut std::collections::HashMap<String, u32>,
+) -> Result<Vec<IrMessage>, ProxyError> {
     let role_str = content["role"]
         .as_str()
         .ok_or_else(|| ProxyError::Parse("content missing 'role'".into()))?;
@@ -307,11 +318,46 @@ fn parse_gemini_content(content: &Value) -> Result<IrMessage, ProxyError> {
         }
     };
 
+    /// Stable synthetic id for a Gemini functionCall/functionResponse pair.
+    /// Gemini has no call ids, so one is derived from the tool name. The old
+    /// `call_{name}_{part_idx}` scheme depended on the part's position in this
+    /// message, which desynced from the id minted when the call was generated
+    /// (different message → different idx) and broke tool_use/tool_result
+    /// matching after cross-format conversion.
+    fn next_call_id(name: &str, counter: &mut std::collections::HashMap<String, u32>) -> String {
+        let n = counter.entry(name.to_string()).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            format!("call_{}", name)
+        } else {
+            format!("call_{}_{}", name, n)
+        }
+    }
+
+    // Calls and their responses share one numbering per tool name: the first
+    // call gets `call_x`, and its matching response reuses that id (the first
+    // response also maps to #1), instead of continuing the call counter.
+    fn next_response_id(
+        name: &str,
+        counter: &mut std::collections::HashMap<String, u32>,
+    ) -> String {
+        let n = counter.entry(name.to_string()).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            format!("call_{}", name)
+        } else {
+            format!("call_{}_{}", name, n)
+        }
+    }
+
     let mut content_parts = Vec::new();
     let mut tool_calls = Vec::new();
+    // functionResponse parts become standalone Tool-role messages so that
+    // completions/anthropic generators can emit proper tool results.
+    let mut tool_results: Vec<IrContentPart> = Vec::new();
 
     if let Some(parts) = content["parts"].as_array() {
-        for (idx, part) in parts.iter().enumerate() {
+        for part in parts {
             if let Some(text) = part["text"].as_str() {
                 content_parts.push(IrContentPart::Text {
                     text: text.to_string(),
@@ -338,9 +384,10 @@ fn parse_gemini_content(content: &Value) -> Result<IrMessage, ProxyError> {
             if let Some(func_call) = part.get("functionCall") {
                 let name = func_call["name"].as_str().unwrap_or("").to_string();
                 let args = func_call["args"].clone();
+                let id = next_call_id(&name, tool_name_counter);
 
                 tool_calls.push(IrToolCall {
-                    id: format!("call_{}_{}", name, idx),
+                    id,
                     name,
                     arguments: serde_json::to_string(&args).unwrap_or_default(),
                 });
@@ -351,8 +398,9 @@ fn parse_gemini_content(content: &Value) -> Result<IrMessage, ProxyError> {
                 let response_content =
                     serde_json::to_string(&func_resp["response"]).unwrap_or_default();
 
-                content_parts.push(IrContentPart::ToolResult {
-                    tool_use_id: name.clone(),
+                let id = next_response_id(&name, tool_response_counter);
+                tool_results.push(IrContentPart::ToolResult {
+                    tool_use_id: id,
                     content: response_content,
                     tool_name: Some(name),
                     id: None,
@@ -361,7 +409,22 @@ fn parse_gemini_content(content: &Value) -> Result<IrMessage, ProxyError> {
         }
     }
 
-    Ok(IrMessage {
+    let mut messages = Vec::new();
+    if !tool_results.is_empty() {
+        // Tool results must precede any leftover user/model text from the same
+        // Gemini content so downstream formats keep result-after-call ordering.
+        for result in tool_results {
+            messages.push(IrMessage {
+                role: IrRole::Tool,
+                content: vec![result],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+    }
+
+    messages.push(IrMessage {
         role,
         content: content_parts,
         name: None,
@@ -371,5 +434,7 @@ fn parse_gemini_content(content: &Value) -> Result<IrMessage, ProxyError> {
         } else {
             Some(tool_calls)
         },
-    })
+    });
+
+    Ok(messages)
 }

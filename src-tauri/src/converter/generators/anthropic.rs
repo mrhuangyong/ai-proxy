@@ -33,7 +33,14 @@ impl FormatGenerator for AnthropicGenerator {
                     // user message containing all matching tool_results.
                     if msg.role == IrRole::Tool {
                         let tool_use_id = msg.tool_call_id.as_deref().unwrap_or("").to_string();
-                        let text = extract_text_parts(&msg.content);
+                        let text = if let Some(IrContentPart::ToolResult { content, .. }) =
+                            msg.content.first()
+                        {
+                            // ToolResult parts carry the payload directly.
+                            content.clone()
+                        } else {
+                            extract_text_parts(&msg.content)
+                        };
                         pending_tool_results.push((tool_use_id, text));
                         continue;
                     }
@@ -102,6 +109,12 @@ impl FormatGenerator for AnthropicGenerator {
 
         // Flush remaining buffered tool results
         flush_pending_tool_results(&mut pending_tool_results, &mut messages);
+
+        // Codex/Responses clients send several consecutive user input items
+        // (user_instructions, environment_context, the actual prompt). The
+        // Anthropic API expects role-alternating conversations; collapse runs
+        // of user messages into one (tool_result blocks first, then text).
+        messages = merge_consecutive_user_messages(messages);
 
         // Ensure every tool_use has a matching tool_result.
         // Anthropic API requires that assistant messages with tool_use be followed
@@ -222,7 +235,9 @@ impl FormatGenerator for AnthropicGenerator {
                     body["thinking"] = thinking_obj;
                 }
                 ThinkingMode::Disabled => {
-                    body["thinking"] = json!({ "type": "disabled" });
+                    // Omit the field entirely: no-thinking is the upstream
+                    // default, and gateways may reject {"type":"disabled"}
+                    // (only "enabled"/"adaptive" are universally accepted).
                 }
             }
         }
@@ -239,7 +254,10 @@ impl FormatGenerator for AnthropicGenerator {
             );
         }
         for (key, val) in &ir.extra {
-            if key != "has_cache_control" && key != "metadata" {
+            // previous_response_id is a Responses-protocol stateless session
+            // pointer; leaking it into the Anthropic body fails with
+            // 400 "extra fields not permitted".
+            if key != "has_cache_control" && key != "metadata" && key != "previous_response_id" {
                 tracing::trace!("AnthropicGenerator extra: {} = {}", key, val);
                 body[key] = val.clone();
             }
@@ -488,6 +506,73 @@ impl FormatGenerator for AnthropicGenerator {
             "stop_sequence": stop_sequence,
             "usage": usage,
         }))
+    }
+}
+
+/// Collapse runs of consecutive user messages into a single message.
+///
+/// Codex/Responses clients emit several consecutive user input items
+/// (user_instructions, environment_context, the prompt itself), which become
+/// back-to-back user messages. The Anthropic API expects role-alternating
+/// conversations; keep tool_result blocks first, then text blocks.
+fn merge_consecutive_user_messages(messages: Vec<Value>) -> Vec<Value> {
+    let mut result: Vec<Value> = Vec::new();
+
+    for msg in messages {
+        let is_user = msg["role"].as_str() == Some("user");
+        if !is_user {
+            result.push(msg);
+            continue;
+        }
+        let Some(prev) = result.last_mut() else {
+            result.push(msg);
+            continue;
+        };
+        if prev["role"].as_str() != Some("user") {
+            result.push(msg);
+            continue;
+        }
+
+        // Merge msg into prev: normalize both contents to block arrays,
+        // tool_result blocks first, other blocks after.
+        let prev_blocks = normalize_content_blocks(prev);
+        let msg_blocks = normalize_content_blocks(&msg);
+        let mut merged: Vec<Value> = Vec::new();
+        merged.extend(
+            prev_blocks
+                .iter()
+                .filter(|b| b["type"] == "tool_result")
+                .cloned(),
+        );
+        merged.extend(
+            msg_blocks
+                .iter()
+                .filter(|b| b["type"] == "tool_result")
+                .cloned(),
+        );
+        merged.extend(
+            prev_blocks
+                .into_iter()
+                .filter(|b| b["type"] != "tool_result"),
+        );
+        merged.extend(
+            msg_blocks
+                .into_iter()
+                .filter(|b| b["type"] != "tool_result"),
+        );
+        prev["content"] = json!(merged);
+    }
+
+    result
+}
+
+/// Normalize a message's content into a Vec of content blocks (string content
+/// becomes a single text block).
+fn normalize_content_blocks(msg: &Value) -> Vec<Value> {
+    match &msg["content"] {
+        Value::Array(arr) => arr.clone(),
+        Value::String(s) if !s.is_empty() => vec![json!({"type": "text", "text": s})],
+        _ => Vec::new(),
     }
 }
 

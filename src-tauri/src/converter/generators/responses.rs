@@ -14,7 +14,14 @@ impl FormatGenerator for ResponsesGenerator {
             match msg.role {
                 IrRole::System | IrRole::Developer => {
                     let text = extract_text_content(&msg.content);
-                    instructions = Some(text);
+                    if !text.is_empty() {
+                        // Multiple system messages accumulate; a plain assign
+                        // here dropped all but the last one.
+                        instructions = Some(match instructions.take() {
+                            Some(prev) => format!("{}\n\n{}", prev, text),
+                            None => text,
+                        });
+                    }
                 }
                 IrRole::User => {
                     let content = convert_message_content(&msg.content);
@@ -86,6 +93,15 @@ impl FormatGenerator for ResponsesGenerator {
                             "call_id": call_id,
                             "output": output,
                         }));
+                    } else {
+                        // A Tool message without tool_call_id cannot be
+                        // represented in the Responses format; dropping it
+                        // silently desyncs the tool history, so surface it as
+                        // an output item with an empty call_id is worse than
+                        // logging and skipping.
+                        tracing::warn!(
+                            "ResponsesGenerator: Tool message without tool_call_id skipped"
+                        );
                     }
                 }
             }
@@ -318,7 +334,14 @@ impl FormatGenerator for ResponsesGenerator {
     }
 
     fn generate_response(&self, ir: &IrResponse) -> Result<Value, ProxyError> {
-        let id = ir.id.as_deref().unwrap_or("resp-proxy");
+        // Normalize to the official resp_ id format: codex keys session items
+        // and previous_response_id off this value. Upstream (e.g. Anthropic)
+        // ids like msg_xxx must not leak through un-prefixed.
+        let id = match ir.id.as_deref() {
+            Some(id) if id.starts_with("resp_") => id.to_string(),
+            Some(id) => format!("resp_{}", id),
+            None => "resp_proxy".to_string(),
+        };
 
         let mut output: Vec<Value> = Vec::new();
 

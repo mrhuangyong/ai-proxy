@@ -565,8 +565,19 @@ pub(crate) async fn handle_proxy_inner(
     };
 
     // Override endpoint path (e.g. /v1/responses/compact for the compact endpoint).
+    // Only Responses-format upstreams have that endpoint — forwarding it to an
+    // Anthropic/Completions upstream 404s. For other formats, keep the
+    // provider's native endpoint and send the compact conversation body as a
+    // regular generate request so the session continues.
     if let Some(ep) = endpoint_override {
-        route.endpoint_path = ep.to_string();
+        if route.target_format == ClientFormat::Responses {
+            route.endpoint_path = ep.to_string();
+        } else {
+            info!(
+                "[ROUTE] endpoint override {} ignored for non-Responses upstream ({}), using native {}",
+                ep, route.provider_name, route.endpoint_path
+            );
+        }
     }
 
     let selected_key =
@@ -748,6 +759,20 @@ pub(crate) async fn handle_proxy_inner(
                     ir_request_for_upstream.model,
                     upstream_host,
                     json_str
+                );
+            }
+            // Optional on-disk dump for debugging protocol conversion
+            // (enable via settings: record_request_body=true).
+            if get_setting("record_request_body")
+                .await
+                .map(|v| v == "true")
+                .unwrap_or(false)
+            {
+                let dir = std::path::Path::new("/tmp/ai-proxy-dump");
+                let _ = std::fs::create_dir_all(dir);
+                let _ = std::fs::write(
+                    dir.join(format!("{}-upstream.json", request_id)),
+                    serde_json::to_vec(&b).unwrap_or_default(),
                 );
             }
             b
@@ -1219,21 +1244,27 @@ pub(crate) async fn handle_proxy_inner(
             serde_json::to_string(&serde_json::Value::Array(vec![raw.clone()])).ok()
         });
 
-        // Cache reasoning_content for multi-turn (non-streaming path)
-        if let Some(ref resp_id) = ir_response.id {
-            let reasoning: String = ir_response
-                .message
-                .content
-                .iter()
-                .filter_map(|p| match p {
-                    IrContentPart::Thinking { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            if !reasoning.is_empty() {
-                if let Ok(mut cache) = REASONING_CACHE.lock() {
-                    cache.insert(resp_id.clone(), reasoning);
+        // Cache reasoning_content for multi-turn (non-streaming path).
+        // Key by the id the CLIENT actually received (client_response), not the
+        // upstream ir_response.id — the generator may prefix/wrap it, and codex
+        // will send the client-visible id back as previous_response_id.
+        if client_format == ClientFormat::Responses {
+            let client_resp_id = client_response["id"].as_str().map(String::from);
+            if let Some(ref resp_id) = client_resp_id {
+                let reasoning: String = ir_response
+                    .message
+                    .content
+                    .iter()
+                    .filter_map(|p| match p {
+                        IrContentPart::Thinking { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !reasoning.is_empty() {
+                    if let Ok(mut cache) = REASONING_CACHE.lock() {
+                        cache.insert(resp_id.clone(), reasoning);
+                    }
                 }
             }
         }
@@ -1312,7 +1343,10 @@ pub(crate) async fn handle_proxy_inner(
                     .boxed()
             };
 
-        let response_id = uuid::Uuid::new_v4().to_string();
+        // Official Responses id format: clients like codex key their session
+        // items (msg_{id} / rs_{id}) and previous_response_id off this value,
+        // so it must carry the resp_ prefix.
+        let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
         let model_name = ir_request.model.clone();
         let client_format_clone = client_format.clone();
 
@@ -1355,6 +1389,7 @@ pub(crate) async fn handle_proxy_inner(
             // Anthropic content block state
             let mut content_block_index: u32 = 0;
             let mut text_block_open = false;
+            let mut thinking_block_open = false;
             let mut tool_block_open = false;
             let mut had_tool_calls = false;
             let is_anthropic = matches!(client_format, ClientFormat::Anthropic);
@@ -1527,9 +1562,52 @@ pub(crate) async fn handle_proxy_inner(
 
                     // Handle Anthropic content block lifecycle
                     if is_anthropic {
-                        // Tool call start: close text block first, open tool_use block
+                        // Thinking delta: manage a thinking content block.
+                        // Previously this branch only looked at delta_content /
+                        // delta_tool_calls, so reasoning deltas from upstreams
+                        // (e.g. reasoning_content on Completions) were dropped.
+                        if let Some(thinking) = &ir_chunk.delta_thinking {
+                            if !thinking.is_empty() {
+                                if !thinking_block_open {
+                                    // A thinking block must come before text/tool
+                                    // blocks; close anything already open.
+                                    if text_block_open {
+                                        yield Ok::<_, std::convert::Infallible>(Bytes::from(
+                                            format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", content_block_index - 1)
+                                        ));
+                                        text_block_open = false;
+                                    }
+                                    let block_start = serde_json::json!({
+                                        "type": "content_block_start",
+                                        "index": content_block_index,
+                                        "content_block": {
+                                            "type": "thinking",
+                                            "thinking": "",
+                                        }
+                                    });
+                                    yield Ok::<_, std::convert::Infallible>(Bytes::from(format!("event: content_block_start\ndata: {}\n\n", block_start)));
+                                    thinking_block_open = true;
+                                    content_block_index += 1;
+                                }
+                                let delta_event = serde_json::json!({
+                                    "type": "content_block_delta",
+                                    "index": content_block_index - 1,
+                                    "delta": {
+                                        "type": "thinking_delta",
+                                        "thinking": thinking,
+                                    }
+                                });
+                                yield Ok::<_, std::convert::Infallible>(Bytes::from(format!("event: content_block_delta\ndata: {}\n\n", delta_event)));
+                            }
+                            continue;
+                        }
+
+                        // Tool call start(s): one upstream chunk may carry several
+                        // tool calls (e.g. Gemini emits multiple functionCall parts
+                        // in one chunk). Emit a full block lifecycle for EACH of
+                        // them instead of only the first.
                         if let Some(tool_calls) = &ir_chunk.delta_tool_calls {
-                            if let Some(tc) = tool_calls.first() {
+                            for tc in tool_calls {
                                 if tc.id.is_some() && tc.name.is_some() {
                                     // Close text block if open
                                     if text_block_open {
@@ -1561,10 +1639,27 @@ pub(crate) async fn handle_proxy_inner(
                                     tool_block_open = true;
                                     had_tool_calls = true;
                                     content_block_index += 1;
-                                    continue;
-                                }
-                                // Argument delta for tool call
-                                if let Some(args) = &tc.arguments {
+                                    // Gemini-style chunks carry full arguments
+                                    // inline on the same delta as id+name; emit
+                                    // them right after the block start so they
+                                    // are not dropped.
+                                    if let Some(args) = &tc.arguments {
+                                        if !args.is_empty() {
+                                            let delta_event = serde_json::json!({
+                                                "type": "content_block_delta",
+                                                "index": content_block_index - 1,
+                                                "delta": {
+                                                    "type": "input_json_delta",
+                                                    "partial_json": args,
+                                                }
+                                            });
+                                            yield Ok::<_, std::convert::Infallible>(Bytes::from(
+                                                format!("event: content_block_delta\ndata: {}\n\n", delta_event)
+                                            ));
+                                        }
+                                    }
+                                } else if let Some(args) = &tc.arguments {
+                                    // Argument delta for the currently open tool call
                                     if !args.is_empty() {
                                         let delta_event = serde_json::json!({
                                             "type": "content_block_delta",
@@ -1578,8 +1673,13 @@ pub(crate) async fn handle_proxy_inner(
                                             format!("event: content_block_delta\ndata: {}\n\n", delta_event)
                                         ));
                                     }
-                                    continue;
                                 }
+                            }
+                            // A chunk may carry tool calls AND text (mixed).
+                            // Fall through to text handling below instead of
+                            // unconditionally `continue`.
+                            if ir_chunk.delta_content.is_none() {
+                                continue;
                             }
                         }
 
@@ -1620,6 +1720,12 @@ pub(crate) async fn handle_proxy_inner(
                         // Finish
                         if ir_chunk.finish_reason.is_some() {
                             // Close any open content blocks
+                            if thinking_block_open {
+                                yield Ok::<_, std::convert::Infallible>(Bytes::from(
+                                    format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", content_block_index - 1)
+                                ));
+                                thinking_block_open = false;
+                            }
                             if text_block_open {
                                 yield Ok::<_, std::convert::Infallible>(Bytes::from(
                                     format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", content_block_index - 1)
@@ -1799,6 +1905,11 @@ pub(crate) async fn handle_proxy_inner(
 
             // Safety: close any open content blocks if stream ended unexpectedly
             if is_anthropic && started && !finished {
+                if thinking_block_open {
+                    yield Ok::<_, std::convert::Infallible>(Bytes::from(
+                        format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", content_block_index - 1)
+                    ));
+                }
                 if text_block_open {
                     yield Ok::<_, std::convert::Infallible>(Bytes::from(
                         format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", content_block_index - 1)
@@ -1940,7 +2051,17 @@ fn extract_text_from_sse_body(body: &str, format: &ClientFormat) -> Option<Strin
                     }
                 }
             }
-            ClientFormat::Completions | ClientFormat::Responses => {
+            ClientFormat::Responses => {
+                // Responses SSE events carry text in `delta` of
+                // response.output_text.delta events — NOT in /choices/0/...
+                // (that is the Completions shape).
+                if json.get("type").and_then(|v| v.as_str()) == Some("response.output_text.delta") {
+                    if let Some(t) = json.get("delta").and_then(|v| v.as_str()) {
+                        parts.push(t.to_string());
+                    }
+                }
+            }
+            ClientFormat::Completions => {
                 if let Some(c) = json
                     .pointer("/choices/0/delta/content")
                     .and_then(|v| v.as_str())
@@ -1949,11 +2070,16 @@ fn extract_text_from_sse_body(body: &str, format: &ClientFormat) -> Option<Strin
                 }
             }
             ClientFormat::Gemini => {
-                if let Some(t) = json
-                    .pointer("/candidates/0/content/parts/0/text")
-                    .and_then(|v| v.as_str())
+                // Gemini splits long text across multiple parts; collect all.
+                if let Some(arr) = json
+                    .pointer("/candidates/0/content/parts")
+                    .and_then(|v| v.as_array())
                 {
-                    parts.push(t.to_string());
+                    for part in arr {
+                        if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+                            parts.push(t.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -2017,9 +2143,56 @@ pub async fn handle_list_models() -> Response {
         })
         .collect();
 
+    // Include BOTH shapes: OpenAI's classic {"data": [...]} for generic
+    // clients, and the richer {"models": [...]} metadata codex's models
+    // manager decodes (it requires `slug`, errors otherwise, and falls back
+    // to a no-tools profile for unknown models).
+    let codex_models: Vec<Value> = models
+        .iter()
+        .map(|m| {
+            json!({
+                "slug": m.model_name,
+                "base_instructions": "You are Codex, a coding agent running in the user's terminal. Use the provided tools to accomplish tasks.",
+                "name": qualified_model_id(&m.provider_name, &m.model_name),
+                "display_name": m.model_name,
+                "shell_type": "default",
+                "visibility": "list",
+                "supported_in_api": true,
+                "priority": 100,
+                "support_verbosity": true,
+                "supports_parallel_tool_calls": true,
+                "experimental_supported_tools": ["apply_patch", "shell", "update_plan", "view_image", "web_search"],
+                "truncation_policy": { "type": "auto", "mode": "tokens", "limit": 1000 },
+                "supported_reasoning_levels": [
+                    {"id": "none", "effort": "none", "description": "No reasoning"},
+                    {"id": "low", "effort": "low", "description": "Low reasoning"},
+                    {"id": "medium", "effort": "medium", "description": "Medium reasoning"},
+                    {"id": "high", "effort": "high", "description": "High reasoning"}
+                ],
+                "supported_apis": ["responses", "chat"],
+                "supported_parameters": [
+                    "function_tools",
+                    "tool_choice",
+                    "parallel_tool_calls",
+                    "local_shell",
+                    "structured_outputs",
+                    "reasoning_effort",
+                    "stream",
+                    "store",
+                    "prompt_cache_key",
+                    "text_verbosity",
+                    "text_format"
+                ],
+                "input_modalities": ["text", "image"],
+                "output_modalities": ["text"],
+            })
+        })
+        .collect();
+
     let body = json!({
         "object": "list",
         "data": data,
+        "models": codex_models,
     });
 
     axum::Json(body).into_response()
@@ -2417,6 +2590,10 @@ pub struct ResponsesStreamStateMachine {
     thinking_started: bool,
     /// whether a reasoning output item has been added but not yet done
     reasoning_item_open: bool,
+    /// whether ANY reasoning was emitted during this response, even after the
+    /// reasoning item was closed (e.g. by the first text delta). Needed so the
+    /// final response.completed/failed output array still includes it.
+    had_reasoning: bool,
     /// pure reasoning without tags, for cache
     accumulated_reasoning: String,
 }
@@ -2443,6 +2620,7 @@ impl ResponsesStreamStateMachine {
             accumulated_text: String::new(),
             thinking_started: false,
             reasoning_item_open: false,
+            had_reasoning: false,
             accumulated_reasoning: String::new(),
         }
     }
@@ -2671,6 +2849,7 @@ impl ResponsesStreamStateMachine {
                         "response_id": self.response_id,
                     })));
                     self.thinking_started = true;
+                    self.had_reasoning = true;
                 }
                 self.accumulated_reasoning.push_str(thinking);
                 out.push(self.ev(serde_json::json!({
@@ -2733,6 +2912,21 @@ impl ResponsesStreamStateMachine {
 
         // --- Upstream failure ---
         if chunk.finish_reason.as_deref() == Some("failed") {
+            // Snapshot output BEFORE closing items: build_responses_output_array
+            // keys off func_open / thinking_started, which the close-out below
+            // sets to false. Snapshotting first keeps the function_call and
+            // reasoning items in the failed response's output.
+            let final_output = build_responses_output_array(
+                &self.message_id,
+                &self.reasoning_id,
+                &self.accumulated_text,
+                &self.accumulated_reasoning,
+                self.had_reasoning,
+                self.func_open,
+                &self.call_id,
+                &self.func_name,
+                &self.accumulated_args,
+            );
             if self.text_part_open {
                 out.push(self.ev(serde_json::json!({
                     "type": "response.output_text.done",
@@ -2791,17 +2985,7 @@ impl ResponsesStreamStateMachine {
                     "object": "response",
                     "status": "failed",
                     "model": self.model,
-                    "output": build_responses_output_array(
-                        &self.message_id,
-                        &self.reasoning_id,
-                        &self.accumulated_text,
-                        &self.accumulated_reasoning,
-                        self.thinking_started,
-                        self.func_open,
-                        &self.call_id,
-                        &self.func_name,
-                        &self.accumulated_args,
-                    ),
+                    "output": final_output,
                 },
                 "error": {
                     "code": err_code,
@@ -2814,6 +2998,20 @@ impl ResponsesStreamStateMachine {
 
         // --- Normal completion ---
         if chunk.finish_reason.is_some() {
+            // Snapshot output BEFORE the close-out below flips func_open /
+            // thinking_started to false, otherwise the completed response's
+            // output array loses its function_call and reasoning items.
+            let final_output = build_responses_output_array(
+                &self.message_id,
+                &self.reasoning_id,
+                &self.accumulated_text,
+                &self.accumulated_reasoning,
+                self.had_reasoning,
+                self.func_open,
+                &self.call_id,
+                &self.func_name,
+                &self.accumulated_args,
+            );
             // Close reasoning summary if still open
             let thinking_done = self.close_thinking();
             if !thinking_done.is_empty() {
@@ -2873,17 +3071,7 @@ impl ResponsesStreamStateMachine {
                     "object": "response",
                     "status": "completed",
                     "model": self.model,
-                    "output": build_responses_output_array(
-                        &self.message_id,
-                        &self.reasoning_id,
-                        &self.accumulated_text,
-                        &self.accumulated_reasoning,
-                        self.thinking_started,
-                        self.func_open,
-                        &self.call_id,
-                        &self.func_name,
-                        &self.accumulated_args,
-                    ),
+                    "output": final_output,
                     "usage": {
                         "input_tokens": usage_totals.0,
                         "output_tokens": usage_totals.1,
@@ -2918,6 +3106,11 @@ impl ResponsesStreamStateMachine {
         }
 
         // Close open items first
+        let thinking_done = self.close_thinking();
+        if !thinking_done.is_empty() {
+            out.extend(thinking_done);
+            self.output_index += 1;
+        }
         if self.func_open {
             out.push(self.ev(serde_json::json!({
                 "type": "response.output_item.done",
@@ -2975,7 +3168,7 @@ impl ResponsesStreamStateMachine {
                         &self.reasoning_id,
                         &self.accumulated_text,
                         &self.accumulated_reasoning,
-                        self.thinking_started,
+                        self.had_reasoning,
                         self.func_open,
                         &self.call_id,
                         &self.func_name,
@@ -3001,7 +3194,7 @@ impl ResponsesStreamStateMachine {
                         &self.reasoning_id,
                         &self.accumulated_text,
                         &self.accumulated_reasoning,
-                        self.thinking_started,
+                        self.had_reasoning,
                         self.func_open,
                         &self.call_id,
                         &self.func_name,
