@@ -215,6 +215,12 @@ impl FormatGenerator for CompletionsGenerator {
             );
         }
         for (key, val) in &ir.extra {
+            // previous_response_id is a Responses-protocol session pointer,
+            // not a Completions parameter; passing it through fails strict
+            // upstreams with 400.
+            if key == "previous_response_id" {
+                continue;
+            }
             tracing::trace!("CompletionsGenerator extra: {} = {}", key, val);
             body[key] = val.clone();
         }

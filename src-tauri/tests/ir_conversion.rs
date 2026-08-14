@@ -658,8 +658,10 @@ fn anthropic_disabled_thinking_roundtrip() {
     let thinking = ir.thinking.as_ref().unwrap();
     assert_eq!(thinking.mode, ThinkingMode::Disabled);
 
+    // Disabled now OMITS the field: no-thinking is the upstream default and
+    // gateways may reject {"type":"disabled"}.
     let out = AnthropicGenerator.generate_request(&ir).unwrap();
-    assert_eq!(out["thinking"]["type"], "disabled");
+    assert!(out.get("thinking").is_none());
 }
 
 #[test]

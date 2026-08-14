@@ -182,6 +182,44 @@ impl InterceptorEngine {
                 "thinking" => {
                     if value.is_null() || value.as_bool() == Some(false) {
                         request.thinking = None;
+                    } else if value.as_bool() == Some(true) {
+                        // Bare `true`: enable with the default budget.
+                        request.thinking = Some(crate::converter::ir::IrThinkingConfig {
+                            mode: crate::converter::ir::ThinkingMode::Enabled,
+                            budget_tokens: None,
+                            display: None,
+                        });
+                    } else if let Some(t) = value.as_object() {
+                        // Structured form mirroring the Anthropic thinking
+                        // parameter: {"type":"enabled","budget_tokens":10000}
+                        let mode: Option<crate::converter::ir::ThinkingMode> = match t
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                        {
+                            Some("enabled") => Some(crate::converter::ir::ThinkingMode::Enabled),
+                            Some("adaptive") => Some(crate::converter::ir::ThinkingMode::Adaptive),
+                            Some("disabled") => {
+                                request.thinking = None;
+                                None
+                            }
+                            other => {
+                                tracing::warn!("Unknown thinking type in override: {:?}", other);
+                                None
+                            }
+                        };
+                        if let Some(mode) = mode {
+                            request.thinking = Some(crate::converter::ir::IrThinkingConfig {
+                                mode,
+                                budget_tokens: t
+                                    .get("budget_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|v| v as u32),
+                                display: t
+                                    .get("display")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                            });
+                        }
                     }
                 }
                 _ => {

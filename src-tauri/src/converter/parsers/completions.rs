@@ -217,15 +217,29 @@ impl FormatParser for CompletionsParser {
 
         let thinking = body.get("reasoning").and_then(|r| {
             let effort = r["effort"].as_str().unwrap_or("medium");
-            Some(IrThinkingConfig {
-                mode: ThinkingMode::Enabled,
-                budget_tokens: match effort {
-                    "low" => Some(5000),
-                    "medium" => Some(10000),
-                    "high" => Some(30000),
-                    _ => None,
+            Some(match effort {
+                // Explicit opt-out: must disable thinking, not enable it with
+                // an unset budget (that force-enabled reasoning upstream).
+                "none" => IrThinkingConfig {
+                    mode: ThinkingMode::Disabled,
+                    budget_tokens: None,
+                    display: None,
                 },
-                display: None,
+                "minimal" => IrThinkingConfig {
+                    mode: ThinkingMode::Enabled,
+                    budget_tokens: Some(1024),
+                    display: None,
+                },
+                _ => IrThinkingConfig {
+                    mode: ThinkingMode::Enabled,
+                    budget_tokens: match effort {
+                        "low" => Some(5000),
+                        "medium" => Some(10000),
+                        "high" => Some(30000),
+                        _ => None,
+                    },
+                    display: None,
+                },
             })
         });
 
@@ -282,15 +296,19 @@ impl FormatParser for CompletionsParser {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             stop_sequences: body.get("stop").and_then(|v| {
-                if v.is_string() {
+                let seqs = if v.is_string() {
                     Some(vec![v.as_str()?.to_string()])
                 } else {
                     v.as_array().map(|arr| {
                         arr.iter()
                             .filter_map(|s| s.as_str().map(String::from))
-                            .collect()
+                            .collect::<Vec<_>>()
                     })
-                }
+                };
+                // An empty `stop: []` must not round-trip: strict upstreams
+                // (OpenAI spec) reject empty arrays with a 400. Map it to
+                // "no stop sequences" instead.
+                seqs.filter(|s| !s.is_empty())
             }),
             response_format: body.get("response_format").cloned(),
             presence_penalty: body

@@ -100,15 +100,41 @@ impl FormatParser for ResponsesParser {
 
         let thinking = body.get("reasoning").and_then(|r| {
             let effort = r.get("effort")?.as_str()?;
-            Some(IrThinkingConfig {
-                mode: ThinkingMode::Enabled,
-                budget_tokens: match effort {
-                    "low" => Some(5000),
-                    "medium" => Some(10000),
-                    "high" => Some(30000),
-                    _ => Some(10000),
+            Some(match effort {
+                // "none" is an explicit opt-OUT of reasoning (codex sends it).
+                // Falling through to a default budget previously force-enabled
+                // thinking on upstreams, producing stream-of-consciousness
+                // text instead of tool calls.
+                "none" => IrThinkingConfig {
+                    mode: ThinkingMode::Disabled,
+                    budget_tokens: None,
+                    display: None,
                 },
-                display: None,
+                "minimal" => IrThinkingConfig {
+                    mode: ThinkingMode::Enabled,
+                    budget_tokens: Some(1024),
+                    display: None,
+                },
+                "low" => IrThinkingConfig {
+                    mode: ThinkingMode::Enabled,
+                    budget_tokens: Some(5000),
+                    display: None,
+                },
+                "medium" => IrThinkingConfig {
+                    mode: ThinkingMode::Enabled,
+                    budget_tokens: Some(10000),
+                    display: None,
+                },
+                "high" => IrThinkingConfig {
+                    mode: ThinkingMode::Enabled,
+                    budget_tokens: Some(30000),
+                    display: None,
+                },
+                _ => IrThinkingConfig {
+                    mode: ThinkingMode::Enabled,
+                    budget_tokens: Some(10000),
+                    display: None,
+                },
             })
         });
 
@@ -177,6 +203,19 @@ impl FormatParser for ResponsesParser {
                     error: None,
                 }))
             }
+            "response.reasoning_summary_text.delta" => {
+                let delta = event["delta"].as_str().unwrap_or("");
+                Ok(Some(IrStreamChunk {
+                    id: event["response_id"].as_str().map(String::from),
+                    model: None,
+                    delta_content: None,
+                    delta_tool_calls: None,
+                    delta_thinking: Some(delta.to_string()),
+                    finish_reason: None,
+                    usage: None,
+                    error: None,
+                }))
+            }
             "response.function_call_arguments.delta" => {
                 let delta = event["delta"].as_str().unwrap_or("");
                 Ok(Some(IrStreamChunk {
@@ -226,20 +265,14 @@ impl FormatParser for ResponsesParser {
                 let item_type = item["type"].as_str().unwrap_or("");
 
                 if item_type == "function_call" {
-                    let call_id = item["call_id"].as_str().unwrap_or("");
-                    let name = item["name"].as_str().unwrap_or("");
-                    let arguments = item["arguments"].as_str().unwrap_or("{}");
-
+                    // Arguments stream via delta events; on done they are
+                    // already accumulated client-side, so re-emitting the full
+                    // arguments here duplicated them for Completions clients.
                     return Ok(Some(IrStreamChunk {
                         id: event["response_id"].as_str().map(String::from),
                         model: None,
                         delta_content: None,
-                        delta_tool_calls: Some(vec![IrToolCallDelta {
-                            index: 0,
-                            id: Some(call_id.to_string()),
-                            name: Some(name.to_string()),
-                            arguments: Some(arguments.to_string()),
-                        }]),
+                        delta_tool_calls: None,
                         delta_thinking: None,
                         finish_reason: None,
                         usage: None,
@@ -503,11 +536,40 @@ fn parse_input_item(item: &Value) -> Result<Option<IrMessage>, ProxyError> {
             if content_parts.is_empty() {
                 if let Some(arr) = item["content"].as_array() {
                     for part in arr {
-                        if let Some(text) = part["text"].as_str() {
-                            content_parts.push(IrContentPart::Text {
-                                text: text.to_string(),
-                                citations: None,
-                            });
+                        match part["type"].as_str() {
+                            // input_image parts must map to IR Image parts so
+                            // image-capable upstreams still receive them.
+                            Some("input_image") => {
+                                let url =
+                                    part.get("image_url").and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(rest) = url.strip_prefix("data:") {
+                                    if let Some(semi) = rest.find(';') {
+                                        let media_type = rest[..semi].to_string();
+                                        let after = &rest[semi + 1..];
+                                        if let Some(comma) = after.find(',') {
+                                            content_parts.push(IrContentPart::Image {
+                                                url: None,
+                                                data: Some(after[comma + 1..].to_string()),
+                                                media_type: Some(media_type),
+                                            });
+                                            continue;
+                                        }
+                                    }
+                                }
+                                content_parts.push(IrContentPart::Image {
+                                    url: Some(url.to_string()),
+                                    data: None,
+                                    media_type: None,
+                                });
+                            }
+                            _ => {
+                                if let Some(text) = part["text"].as_str() {
+                                    content_parts.push(IrContentPart::Text {
+                                        text: text.to_string(),
+                                        citations: None,
+                                    });
+                                }
+                            }
                         }
                     }
                 }
