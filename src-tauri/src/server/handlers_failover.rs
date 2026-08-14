@@ -73,7 +73,8 @@ pub async fn handle_list_models() -> Response {
         .iter()
         .map(|n| json!({ "id": n, "object": "model", "created": 0, "owned_by": "failover" }))
         .collect();
-    axum::Json(json!({ "object": "list", "data": data })).into_response()
+    // Both shapes for codex compatibility (see handlers::handle_list_models).
+    axum::Json(json!({ "object": "list", "data": data, "models": data })).into_response()
 }
 
 /// `GET /failover/v1/models/:model` — OpenAI-style get a single virtual model.

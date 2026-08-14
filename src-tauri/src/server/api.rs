@@ -63,9 +63,7 @@ fn validate_provider_name(name: &str) -> Result<(), Json<ApiError>> {
     let ok = name.len() >= 1
         && name
             .chars()
-            .all(|c| {
-                c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '-' || c == '_'
-            })
+            .all(|c| c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '-' || c == '_')
         && name
             .chars()
             .next()
@@ -2101,7 +2099,16 @@ mod tests {
 
     #[test]
     fn valid_provider_names_pass() {
-        for name in ["opencode", "OpenCode", "openai123", "A", "a1b2c3"] {
+        // `-` and `_` were allowed by 67bbf98 (feat(providers): allow - and _)
+        for name in [
+            "opencode",
+            "OpenCode",
+            "openai123",
+            "A",
+            "a1b2c3",
+            "opencode-go",
+            "opencode_go",
+        ] {
             assert!(validate_provider_name(name).is_ok(), "{name} should pass");
         }
     }
@@ -2111,14 +2118,13 @@ mod tests {
         for name in [
             "",
             "1opencode",
-            "opencode-go",
-            "opencode_go",
             "opencode go",
             "opencode/",
             "中文",
             "opencode!",
             "a b",
             "-opencode",
+            "_opencode",
         ] {
             assert!(validate_provider_name(name).is_err(), "{name} should fail");
         }
