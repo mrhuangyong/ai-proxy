@@ -1543,9 +1543,16 @@ pub(crate) async fn handle_proxy_inner(
 
                     // Emit stream start on first real content
                     // (Responses format manages its own start lifecycle)
+                    // NOTE: delta_thinking must count as content — reasoning
+                    // models (DeepSeek R1, GLM, ...) emit reasoning before any
+                    // text/tool delta. Without it, message_start is never sent
+                    // before the thinking content_block_start, and Anthropic
+                    // clients reject the stream with
+                    // "Unexpected event order, got content_block_start before message_start".
                     if !started && !is_responses {
                         let has_content = ir_chunk.delta_content.is_some()
                             || ir_chunk.delta_tool_calls.is_some()
+                            || ir_chunk.delta_thinking.is_some()
                             || ir_chunk.finish_reason.is_some();
                         if has_content {
                             if let Some(start_event) = client_generator.generate_stream_start(&response_id, &model_name, total_prompt, total_completion, total_cached) {
