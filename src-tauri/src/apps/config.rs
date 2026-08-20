@@ -91,7 +91,7 @@ pub fn config_path_for(app_type: &AppType) -> PathBuf {
 }
 
 pub async fn write_codex_config(
-    _model: &str,
+    model: &str,
     proxy_base: &str,
     api_key: &str,
     preserve_auth: bool,
@@ -107,9 +107,15 @@ pub async fn write_codex_config(
         HashMap::new()
     };
 
-    // Don't inject model — let codex use its default (gpt-*).
-    // The interceptor rule will route gpt* -> target model.
-    config.remove("model");
+    // Use the dashboard-selected model as codex's default so it starts on the
+    // proxy model directly. Model metadata (tools, reasoning levels) is served
+    // by the proxy's /v1/models for codex's models manager. Built-in gpt-*
+    // slugs still fall back to the dashboard model via the interceptor rule.
+    if model.is_empty() {
+        config.remove("model");
+    } else {
+        config.insert("model".to_string(), toml::Value::String(model.to_string()));
+    }
 
     config.insert(
         "model_provider".to_string(),

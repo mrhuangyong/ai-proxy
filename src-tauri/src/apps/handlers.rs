@@ -491,7 +491,10 @@ async fn sync_codex_route_rule(model: &str) {
         return;
     }
 
-    let condition_json = r#"{"type":"path_contains","substring":"/responses"}"#;
+    // Only reroute codex's built-in gpt-* slugs (the entire built-in catalog
+    // is gpt-prefixed) to the dashboard model. Requests already carrying a
+    // proxy-served model pass through untouched so in-codex selection works.
+    let condition_json = r#"{"type":"model_matches","pattern":"gpt*"}"#;
     let action_json = format!(r#"{{"type":"replace_model","model":"{}"}}"#, model);
 
     let _ = sqlx::query(
@@ -508,7 +511,7 @@ async fn sync_codex_route_rule(model: &str) {
     .execute(pool)
     .await;
 
-    tracing::info!("Synced codex auto-route rule: path=/responses -> {}", model);
+    tracing::info!("Synced codex auto-route rule: model=gpt* -> {}", model);
 }
 
 async fn resolve_proxy_auth_key() -> Result<String, String> {
