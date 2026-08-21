@@ -177,6 +177,17 @@ pub async fn write_codex_config(
             .map_err(|e| format!("Failed to create config directory: {}", e))?;
     }
 
+    // Keep the previous config so users can recover if a launch from another
+    // build (e.g. dev) overwrote a working base_url/model.
+    if let Ok(old) = tokio::fs::read_to_string(&path).await {
+        if old != content {
+            let bak = path.with_extension("toml.aiproxy.bak");
+            if let Err(e) = tokio::fs::write(&bak, &old).await {
+                tracing::warn!("Failed to back up codex config to {:?}: {}", bak, e);
+            }
+        }
+    }
+
     atomic_write(&path, &content).await?;
     tracing::info!("Wrote codex config to {:?}", path);
 

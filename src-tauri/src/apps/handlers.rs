@@ -228,12 +228,28 @@ pub async fn launch_app(
     let port = settings_map
         .get("http_port")
         .cloned()
-        .unwrap_or_else(|| "7860".into());
+        .unwrap_or_else(|| crate::server::default_http_port().to_string());
     let preserve_auth = settings_map
         .get("codex_preserve_auth")
         .map(|v| v == "true")
         .unwrap_or(false);
     let proxy_base = format!("http://127.0.0.1:{}", port);
+
+    // Refuse to overwrite downstream app configs if the proxy isn't actually
+    // listening on the target port — otherwise we'd strand the app pointing
+    // at a dead proxy (e.g. dev build overwrote a prod-written base_url).
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)),
+    )
+    .await;
+    if !matches!(probe, Ok(Ok(_))) {
+        return Err(err_json(format!(
+            "代理服务未监听端口 {}，已阻止改写 {} 配置（现有配置保持不变）",
+            port,
+            app_type.display_name()
+        )));
+    }
 
     // Detect whether any of the configured models are virtual models.
     // If so, the proxy_url must use the /failover/ prefix so downstream
