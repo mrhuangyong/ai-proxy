@@ -1002,7 +1002,7 @@ async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
         http_port: map
             .get("http_port")
             .cloned()
-            .unwrap_or_else(|| "7860".into()),
+            .unwrap_or_else(|| crate::server::default_http_port().to_string()),
         log_retention_days: map
             .get("log_retention_days")
             .cloned()

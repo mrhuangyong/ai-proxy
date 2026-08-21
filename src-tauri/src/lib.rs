@@ -47,8 +47,6 @@ use tauri::Emitter;
 use tauri::Manager;
 
 #[cfg(feature = "desktop")]
-const DEFAULT_PROXY_PORT: u16 = 7860;
-#[cfg(feature = "desktop")]
 const DEFAULT_PROXY_HOST: &str = "0.0.0.0";
 
 #[cfg(feature = "desktop")]
@@ -66,7 +64,7 @@ struct ProxyControl {
 static PROXY_CONTROL: Lazy<Mutex<ProxyControl>> = Lazy::new(|| {
     Mutex::new(ProxyControl {
         running: false,
-        port: DEFAULT_PROXY_PORT,
+        port: server::default_http_port(),
         host: DEFAULT_PROXY_HOST.to_string(),
         shutdown_tx: None,
     })
@@ -78,10 +76,12 @@ async fn get_proxy_config() -> (String, u16) {
     let port_str: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'http_port'")
         .fetch_one(pool)
         .await
-        .unwrap_or_else(|_| DEFAULT_PROXY_PORT.to_string());
+        .unwrap_or_else(|_| server::default_http_port().to_string());
     (
         DEFAULT_PROXY_HOST.to_string(),
-        port_str.parse().unwrap_or(DEFAULT_PROXY_PORT),
+        port_str
+            .parse()
+            .unwrap_or_else(|_| server::default_http_port()),
     )
 }
 
@@ -188,7 +188,7 @@ fn start_proxy() -> (String, u16) {
         ctrl.running = false;
     });
 
-    (DEFAULT_PROXY_HOST.to_string(), DEFAULT_PROXY_PORT)
+    (DEFAULT_PROXY_HOST.to_string(), server::default_http_port())
 }
 
 #[cfg(feature = "desktop")]

@@ -13,6 +13,20 @@ use tracing::info;
 use crate::server::middleware::create_cors_layer;
 use crate::server::router::create_router;
 
+/// Default proxy port when `http_port` is not configured in settings.
+///
+/// Dev builds share downstream app configs (~/.codex etc.) with the production
+/// install but run their own proxy on their own database. Defaulting dev to a
+/// distinct port prevents a dev launch from silently rewriting the production
+/// base_url to a port that dies when the dev process exits.
+pub fn default_http_port() -> u16 {
+    if cfg!(debug_assertions) {
+        17861
+    } else {
+        7860
+    }
+}
+
 pub async fn create_server(host: &str, port: u16) -> Router {
     let cors = create_cors_layer(host);
     let app = create_router().layer(cors);
