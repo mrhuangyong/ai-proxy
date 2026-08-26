@@ -59,6 +59,59 @@ fn parse_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64
         })
 }
 
+/// Default cap for buffered request bodies. Bigmodel's multimodal models accept
+/// base64 videos up to 200MB raw (~267MB after base64 inflation), so 512MB lets
+/// every request the upstream would accept pass through while still guarding the
+/// process against runaway memory (bodies are fully buffered and JSON-parsed).
+pub(crate) const DEFAULT_MAX_REQUEST_BODY_MB: usize = 512;
+
+/// Request body limit in bytes, from the `max_request_body_mb` setting.
+/// Falls back to the default when the setting is absent, unparsable or <= 0.
+pub(crate) async fn load_max_request_body_bytes() -> usize {
+    let pool_ref = crate::db::get_pool().await;
+    let val: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'max_request_body_mb'")
+            .fetch_optional(pool_ref)
+            .await
+            .ok()
+            .flatten();
+    parse_max_request_body_mb(val.as_deref())
+}
+
+fn parse_max_request_body_mb(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|mb| *mb > 0)
+        .map(|mb| mb.saturating_mul(1024 * 1024))
+        .unwrap_or(DEFAULT_MAX_REQUEST_BODY_MB * 1024 * 1024)
+}
+
+#[cfg(test)]
+mod body_limit_tests {
+    use super::*;
+
+    #[test]
+    fn parses_mb_setting() {
+        assert_eq!(parse_max_request_body_mb(Some("1")), 1024 * 1024);
+        assert_eq!(parse_max_request_body_mb(Some(" 300 ")), 300 * 1024 * 1024);
+    }
+
+    #[test]
+    fn falls_back_to_default_on_bad_input() {
+        assert_eq!(
+            parse_max_request_body_mb(None),
+            DEFAULT_MAX_REQUEST_BODY_MB * 1024 * 1024
+        );
+        assert_eq!(
+            parse_max_request_body_mb(Some("0")),
+            DEFAULT_MAX_REQUEST_BODY_MB * 1024 * 1024
+        );
+        assert_eq!(
+            parse_max_request_body_mb(Some("abc")),
+            DEFAULT_MAX_REQUEST_BODY_MB * 1024 * 1024
+        );
+    }
+}
+
 use crate::provider::manager::{ProviderManager, ResolvedRoute};
 
 pub async fn handle_completions(request: Request) -> Response {
@@ -92,7 +145,8 @@ pub async fn handle_anthropic_count_tokens(request: Request) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
 
     let (_parts, body) = request.into_parts();
-    let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+    let max_body = load_max_request_body_bytes().await;
+    let body_bytes = match axum::body::to_bytes(body, max_body).await {
         Ok(b) => b,
         Err(e) => {
             error!("Failed to read count_tokens request body: {}", e);
@@ -283,11 +337,38 @@ pub(crate) async fn handle_proxy_inner(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+    let max_body = load_max_request_body_bytes().await;
+    let body_bytes = match axum::body::to_bytes(body, max_body).await {
         Ok(b) => b,
         Err(e) => {
             error!("Failed to read request body: {}", e);
-            return ProxyError::Parse(format!("failed to read body: {}", e)).into_response();
+            let err_msg = format!("failed to read body: {}", e);
+            if let Err(le) = log_request_entry(
+                &request_id,
+                &client_format,
+                "proxy",
+                &client_format,
+                "unknown",
+                "",
+                false,
+                400,
+                start.elapsed().as_millis() as i64,
+                Some(&err_msg),
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                0,
+                None,
+                client_user_agent.as_deref(),
+            )
+            .await
+            {
+                tracing::error!("Early error logging failed: {}", le);
+            }
+            return ProxyError::Parse(err_msg).into_response();
         }
     };
 

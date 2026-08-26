@@ -58,6 +58,22 @@
             style="width: 100%"
           />
         </n-form-item>
+        <n-form-item>
+          <template #label>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <span>请求体上限（MB）</span>
+              </template>
+              代理接收单个请求的最大体积，视频/图片等 base64 附件计入。默认 512MB，覆盖智谱 GLM 视频上限（原始 200MB）
+            </n-tooltip>
+          </template>
+          <n-input-number
+            v-model:value="settings.maxRequestBodyMb"
+            :min="1"
+            :max="4096"
+            style="width: 100%"
+          />
+        </n-form-item>
         <n-form-item label="自动重试次数">
           <n-input-number
             v-model:value="settings.upstreamMaxRetries"
@@ -360,6 +376,7 @@ interface AppSettings {
   port: number
   requestTimeout: number
   connectTimeout: number
+  maxRequestBodyMb: number
   logRetentionDays: number
   recordRequestBody: boolean
   proxyAuthKey: string
@@ -376,6 +393,7 @@ const settings = ref<AppSettings>({
   port: 7860,
   requestTimeout: 1200,
   connectTimeout: 30,
+  maxRequestBodyMb: 512,
   logRetentionDays: 30,
   recordRequestBody: false,
   proxyAuthKey: '',
@@ -407,6 +425,7 @@ async function loadSettings() {
       http_port: string
       request_timeout: string
       connect_timeout: string
+      max_request_body_mb: string
       log_retention_days: string
       record_request_body: string
       proxy_auth_enabled: string
@@ -423,6 +442,7 @@ async function loadSettings() {
       port: parseInt(data.http_port) || 7860,
       requestTimeout: parseInt(data.request_timeout) || 1200,
       connectTimeout: parseInt(data.connect_timeout) || 30,
+      maxRequestBodyMb: parseInt(data.max_request_body_mb) || 512,
       logRetentionDays: parseInt(data.log_retention_days) || 30,
       recordRequestBody: data.record_request_body === 'true',
       proxyAuthKey: data.proxy_auth_key,
@@ -456,6 +476,7 @@ async function handleSave() {
         http_port: String(settings.value.port),
         request_timeout: String(settings.value.requestTimeout),
         connect_timeout: String(settings.value.connectTimeout),
+        max_request_body_mb: String(settings.value.maxRequestBodyMb),
         log_retention_days: String(settings.value.logRetentionDays),
         record_request_body: String(settings.value.recordRequestBody),
         proxy_auth_enabled: 'true',

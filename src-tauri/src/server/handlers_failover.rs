@@ -169,7 +169,8 @@ async fn run_failover(
     let start = std::time::Instant::now();
     let (parts, body) = request.into_parts();
 
-    let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+    let max_body = handlers::load_max_request_body_bytes().await;
+    let body_bytes = match axum::body::to_bytes(body, max_body).await {
         Ok(b) => b,
         Err(e) => {
             return ProxyError::Parse(format!("failed to read failover body: {}", e))
