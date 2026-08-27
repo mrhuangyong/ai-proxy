@@ -1146,6 +1146,259 @@ struct TestModelResult {
     error: Option<String>,
 }
 
+// --- Upstream model list probe ---
+
+#[derive(Deserialize)]
+struct ProbeModelsBody {
+    /// Edit mode with a blank key field: fall back to the stored key.
+    provider_id: Option<String>,
+    base_url: String,
+    format: String,
+    endpoint_path: Option<String>,
+    api_key: Option<String>,
+    upstream_user_agent: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ProbeModelItem {
+    id: String,
+    display_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ProbeModelsResult {
+    success: bool,
+    message: String,
+    models: Vec<ProbeModelItem>,
+    error: Option<String>,
+}
+
+fn probe_fail(message: &str, error: Option<String>) -> Json<ApiResponse<ProbeModelsResult>> {
+    ok(ProbeModelsResult {
+        success: false,
+        message: message.into(),
+        models: vec![],
+        error,
+    })
+}
+
+/// Derive the upstream models-list URL from the base URL and the effective
+/// chat endpoint path: strip the trailing operation segment (`/v1/chat/completions`
+/// -> `/v1`) so custom version prefixes like `/api/v3` also resolve. Falls back
+/// to the standard per-format version prefix.
+fn probe_models_url(base_url: &str, format: &ClientFormat, endpoint_path: Option<&str>) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let effective = endpoint_path
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && p.starts_with('/'))
+        .map(String::from)
+        .unwrap_or_else(|| match format {
+            ClientFormat::Completions => "/v1/chat/completions".into(),
+            ClientFormat::Responses => "/v1/responses".into(),
+            ClientFormat::Anthropic => "/v1/messages".into(),
+            ClientFormat::Gemini => "/v1beta/models/:generateContent".into(),
+        });
+
+    let root = match format {
+        ClientFormat::Gemini => effective
+            .split_once("/models/")
+            .map(|(prefix, _)| prefix.to_string())
+            .unwrap_or_else(|| "/v1beta".into()),
+        _ => [
+            "/chat/completions",
+            "/completions",
+            "/responses",
+            "/messages",
+        ]
+        .iter()
+        .find_map(|suffix| effective.strip_suffix(suffix))
+        .map(str::to_string)
+        .unwrap_or_else(|| "/v1".into()),
+    };
+    format!("{base}{root}/models")
+}
+
+/// Decrypt the provider's next rotated key for management-side upstream calls.
+/// Ok(None) when no provider id was given.
+async fn stored_provider_key(provider_id: Option<&str>) -> Result<Option<String>, (String, String)> {
+    let pid = match provider_id {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let selected = KeyRotation::get_next_key(pid, &RotationStrategy::LeastUsed)
+        .await
+        .map_err(|e| ("未找到可用的 API Key".into(), e.to_string()))?;
+    if selected.nonce.len() != 12 {
+        return Err(("已存 API Key 的 Nonce 格式错误".into(), "invalid nonce length".into()));
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&selected.nonce);
+    let key = decrypt_api_key(&selected.encrypted_key, &nonce)
+        .map_err(|e| ("已存 API Key 解密失败".into(), e.to_string()))?;
+    Ok(Some(key))
+}
+
+async fn probe_models(
+    axum::Json(body): axum::Json<ProbeModelsBody>,
+) -> Result<Json<ApiResponse<ProbeModelsResult>>, Json<ApiError>> {
+    if body.base_url.trim().trim_end_matches('/').is_empty() {
+        return Ok(probe_fail("Base URL 不能为空", None));
+    }
+
+    let format = match crate::provider::manager::parse_client_format(&body.format) {
+        Ok(f) => f,
+        Err(e) => return Ok(probe_fail("不支持的格式", Some(e.to_string()))),
+    };
+
+    // Key resolution: form input first, then the provider's stored key, else
+    // anonymous (local endpoints like ollama need no auth).
+    let form_key = body
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(String::from);
+    let api_key: Option<String> = match form_key {
+        Some(k) => Some(k),
+        None => match stored_provider_key(body.provider_id.as_deref()).await {
+            Ok(k) => k,
+            Err((msg, err)) => return Ok(probe_fail(&msg, Some(err))),
+        },
+    };
+
+    let url = probe_models_url(&body.base_url, &format, body.endpoint_path.as_deref());
+
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let mut req_builder = http_client.get(&url);
+
+    // User-Agent: form override > global setting > none (same priority as test_model).
+    let mut final_ua = body
+        .upstream_user_agent
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if final_ua.is_empty() {
+        let pool = get_pool().await;
+        let global_ua: Option<String> = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM settings WHERE key = 'upstream_user_agent'",
+        )
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        if let Some(g) = global_ua {
+            final_ua = g.trim().to_string();
+        }
+    }
+    if !final_ua.is_empty() {
+        req_builder = req_builder.header("User-Agent", &final_ua);
+    }
+
+    if let Some(key) = api_key.as_ref() {
+        match format {
+            ClientFormat::Anthropic => {
+                req_builder = req_builder.header("x-api-key", key);
+                req_builder = req_builder.header("anthropic-version", "2023-06-01");
+            }
+            _ => {
+                req_builder = req_builder.bearer_auth(key);
+            }
+        }
+    }
+
+    let resp = match req_builder.send().await {
+        Ok(r) => r,
+        Err(e) => return Ok(probe_fail("请求上游供应商失败", Some(e.to_string()))),
+    };
+
+    let status = resp.status();
+    let resp_body = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => return Ok(probe_fail("读取响应失败", Some(e.to_string()))),
+    };
+
+    if !status.is_success() {
+        let err_msg: String = resp_body.chars().take(500).collect();
+        return Ok(probe_fail(
+            &format!("上游返回错误状态: {status}"),
+            Some(err_msg),
+        ));
+    }
+
+    let resp_value: serde_json::Value = match serde_json::from_str(&resp_body) {
+        Ok(v) => v,
+        Err(e) => return Ok(probe_fail("上游响应不是有效 JSON", Some(e.to_string()))),
+    };
+
+    let mut items: Vec<ProbeModelItem> = match format {
+        ClientFormat::Gemini => resp_value
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| {
+                        let name = entry.get("name")?.as_str()?;
+                        let id = name.strip_prefix("models/").unwrap_or(name);
+                        if id.is_empty() {
+                            return None;
+                        }
+                        Some(ProbeModelItem {
+                            id: id.to_string(),
+                            display_name: entry
+                                .get("displayName")
+                                .and_then(|d| d.as_str())
+                                .map(String::from),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => resp_value
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| {
+                        let id = entry.get("id")?.as_str()?;
+                        if id.is_empty() {
+                            return None;
+                        }
+                        Some(ProbeModelItem {
+                            id: id.to_string(),
+                            display_name: entry
+                                .get("display_name")
+                                .and_then(|d| d.as_str())
+                                .map(String::from),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+
+    if items.is_empty() {
+        let snippet: String = resp_body.chars().take(300).collect();
+        return Ok(probe_fail("上游响应中未找到模型列表", Some(snippet)));
+    }
+
+    // Keep upstream order (newest-first for Anthropic-style APIs) so the probe
+    // dialog matches what a raw curl of the models endpoint returns.
+    items.dedup_by(|a, b| a.id.eq_ignore_ascii_case(&b.id));
+
+    Ok(ok(ProbeModelsResult {
+        success: true,
+        message: format!("探测到 {} 个模型", items.len()),
+        models: items,
+        error: None,
+    }))
+}
+
 fn get_generator(format: &ClientFormat) -> Box<dyn FormatGenerator> {
     match format {
         ClientFormat::Completions => Box::new(CompletionsGenerator),
@@ -1974,6 +2227,10 @@ pub fn api_routes() -> axum::Router {
         .route("/usage", axum::routing::get(get_usage).delete(clear_usage))
         .route("/usage/trend", axum::routing::get(get_usage_trend))
         .route("/models/test", axum::routing::post(test_model))
+        .route(
+            "/providers/probe-models",
+            axum::routing::post(probe_models),
+        )
         .route("/rules", axum::routing::get(list_rules).post(create_rule))
         .route("/rules/:id", routing::put(update_rule).delete(delete_rule))
         .route(

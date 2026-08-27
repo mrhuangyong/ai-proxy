@@ -162,11 +162,47 @@
               删除
             </n-button>
           </div>
-          <n-button dashed size="small" @click="addModel">
-            + 添加模型
-          </n-button>
+          <div style="display: flex; gap: 8px">
+            <n-button dashed size="small" @click="addModel">
+              + 添加模型
+            </n-button>
+            <n-button dashed size="small" :loading="probing" @click="handleProbeModels">
+              探测模型
+            </n-button>
+          </div>
         </n-space>
       </n-form>
+    </n-modal>
+
+    <n-modal
+      v-model:show="showProbeModal"
+      preset="card"
+      title="导入探测到的模型"
+      style="width: 560px"
+    >
+      <n-space vertical>
+        <n-text depth="3" style="font-size: 13px">
+          共探测到 {{ probeResults.length }} 个模型<span v-if="probeExistingCount > 0">，其中 {{ probeExistingCount }} 个已存在（灰显）</span>，请选择要导入的模型：
+        </n-text>
+        <n-select
+          v-model:value="probeSelected"
+          multiple
+          filterable
+          clearable
+          :options="probeOptions"
+          placeholder="搜索或选择要导入的模型"
+          :max-tag-count="8"
+        />
+      </n-space>
+      <template #footer>
+        <div style="display: flex; justify-content: flex-end; gap: 8px">
+          <n-button size="small" @click="showProbeModal = false">取消</n-button>
+          <n-button size="small" @click="probeSelected = probeOptions.filter((o) => !o.disabled).map((o) => o.value)">全选</n-button>
+          <n-button size="small" type="primary" :disabled="probeSelected.length === 0" @click="confirmProbeImport">
+            导入（{{ probeSelected.length }}）
+          </n-button>
+        </div>
+      </template>
     </n-modal>
 
     <n-modal
@@ -267,7 +303,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useMessage } from 'naive-ui'
 import { api } from '../api'
 import type { Provider, ModelCapabilities } from '../types'
@@ -295,6 +331,37 @@ const testModels = ref<Array<{ model_name: string; context_window: number | null
 const testing = ref(false)
 const testingModel = ref('')
 const testResult = ref<TestResult | null>(null)
+
+interface ProbeModelItem {
+  id: string
+  display_name: string | null
+}
+
+interface ProbeModelsResult {
+  success: boolean
+  message: string
+  models: ProbeModelItem[]
+  error: string | null
+}
+
+const probing = ref(false)
+const showProbeModal = ref(false)
+const probeResults = ref<ProbeModelItem[]>([])
+const probeSelected = ref<string[]>([])
+
+/** Full upstream list; models already in the form stay visible but disabled
+ * with an "已存在" suffix, so the dialog matches a raw curl of the upstream
+ * models endpoint instead of silently hiding entries. */
+const probeOptions = computed(() => {
+  const existing = new Set(form.value.models.map((m) => m.model_name))
+  return probeResults.value.map((m) => {
+    const hasDisplayName = !!m.display_name && m.display_name.toLowerCase() !== m.id.toLowerCase()
+    const label = hasDisplayName ? `${m.id}（${m.display_name}）` : m.id
+    const disabled = existing.has(m.id)
+    return { label: disabled ? `${label}（已存在）` : label, value: m.id, disabled }
+  })
+})
+const probeExistingCount = computed(() => probeOptions.value.filter((o) => o.disabled).length)
 
 const CLAUDE_CLI_UA = 'claude-cli/2.1.181 (external, cli)'
 
@@ -472,6 +539,58 @@ async function handleTestModel(modelName: string) {
     testing.value = false
     testingModel.value = ''
   }
+}
+
+/** Fetch the upstream model list with the dialog's current form values.
+ * Edit mode with a blank key field falls back to the stored key server-side. */
+async function handleProbeModels() {
+  if (!form.value.base_url.trim()) {
+    message.error('请先填写 Base URL')
+    return
+  }
+  probing.value = true
+  try {
+    const result = await api<ProbeModelsResult>('/api/providers/probe-models', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider_id: isEditing.value ? editingId.value : null,
+        base_url: form.value.base_url.trim(),
+        format: form.value.format,
+        endpoint_path: form.value.endpoint_path?.trim() || null,
+        api_key: form.value.api_key?.trim() || null,
+        upstream_user_agent: form.value.upstream_user_agent?.trim() || null,
+      }),
+    })
+    if (!result.success) {
+      message.error(result.error ? `${result.message}：${result.error}` : result.message)
+      return
+    }
+    probeResults.value = result.models
+    probeSelected.value = []
+    if (result.models.length === 0) {
+      message.info('探测到的模型均已存在')
+      return
+    }
+    showProbeModal.value = true
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : '探测失败')
+  } finally {
+    probing.value = false
+  }
+}
+
+function confirmProbeImport() {
+  if (probeSelected.value.length === 0) return
+  form.value.models = [
+    ...form.value.models,
+    ...probeSelected.value.map((id) => ({
+      model_name: id,
+      context_window: null,
+      capabilities: defaultCapabilities(),
+    })),
+  ]
+  message.success(`已导入 ${probeSelected.value.length} 个模型`)
+  showProbeModal.value = false
 }
 
 async function handleSubmit() {
