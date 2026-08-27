@@ -1,6 +1,6 @@
 [package]
 name = "ai-proxy"
-version = "0.6.67"
+version = "0.6.68"
 description = "AI LLM Network Proxy"
 authors = ["mrhua"]
 edition = "2021"
