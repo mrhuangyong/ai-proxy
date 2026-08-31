@@ -206,6 +206,7 @@ fn stop_proxy() {
 #[cfg(feature = "desktop")]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -271,7 +272,16 @@ pub fn run() {
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
                 None,
             ))
-            .plugin(tauri_plugin_window_state::Builder::new().build())
+            .plugin(
+                tauri_plugin_window_state::Builder::new()
+                    // Never persist visibility: a session that ends hidden
+                    // (close = hide-to-tray) must not restore hidden on launch.
+                    .with_state_flags(
+                        tauri_plugin_window_state::StateFlags::all()
+                            & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                    )
+                    .build(),
+            )
             .plugin(tauri_plugin_fs::init())
             .setup(|app| {
                 let base_data_dir = app
@@ -328,7 +338,16 @@ pub fn run() {
                     None::<&str>,
                 )?;
                 let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&check_update_item, &quit_item])?;
+                // Linux tray backends (libappindicator) never emit click events,
+                // so a menu entry is the only way to restore the hidden window.
+                let show_item = MenuItem::with_id(
+                    app,
+                    "show-window",
+                    "Show Main Window",
+                    true,
+                    None::<&str>,
+                )?;
+                let menu = Menu::with_items(app, &[&show_item, &check_update_item, &quit_item])?;
 
                 let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
 
@@ -338,7 +357,11 @@ pub fn run() {
                     .menu(&menu)
                     .show_menu_on_left_click(false)
                     .on_menu_event(move |app, event| {
-                        if event.id() == "quit" {
+                        if event.id() == "show-window" {
+                            #[cfg(target_os = "macos")]
+                            set_dock_visibility(true);
+                            show_main_window(app);
+                        } else if event.id() == "quit" {
                             stop_proxy();
                             app.exit(0);
                         } else if event.id() == "check-update" {
