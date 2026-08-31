@@ -155,7 +155,7 @@ jobs:
         with:
           timeout_minutes: 30
           max_attempts: 3
-          command: pnpm tauri build -- ${{ runner.os == 'Linux' && '--bundles deb,rpm' || '' }}
+          command: pnpm tauri build ${{ runner.os == 'Linux' && '--bundles deb,rpm' || '' }}
 
       - name: Upload desktop bundle
         uses: actions/upload-artifact@v4
