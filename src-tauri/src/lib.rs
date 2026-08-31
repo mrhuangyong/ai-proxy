@@ -298,7 +298,8 @@ pub fn run() {
             .plugin(tauri_plugin_dialog::init())
             .plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-                None,
+                // Auto-start launches run hidden to tray; see setup below.
+                Some(vec!["--hidden"]),
             ))
             .plugin(
                 tauri_plugin_window_state::Builder::new()
@@ -312,6 +313,14 @@ pub fn run() {
             )
             .plugin(tauri_plugin_fs::init())
             .setup(|app| {
+                // Auto-start passes --hidden: begin in tray without a window.
+                if std::env::args().any(|arg| arg == "--hidden") {
+                    #[cfg(target_os = "macos")]
+                    set_dock_visibility(false);
+                } else {
+                    show_main_window(app.app_handle());
+                }
+
                 let base_data_dir = app
                     .path()
                     .app_data_dir()
