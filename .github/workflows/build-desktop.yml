@@ -86,6 +86,9 @@ jobs:
           - name: Windows
             runner: windows-latest
             artifact_name: ai-proxy-windows
+          - name: Linux
+            runner: ubuntu-22.04
+            artifact_name: ai-proxy-linux
 
     defaults:
       run:
@@ -134,6 +137,12 @@ jobs:
             . -> target
             src-tauri -> src-tauri/target
 
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
@@ -146,7 +155,7 @@ jobs:
         with:
           timeout_minutes: 30
           max_attempts: 3
-          command: pnpm tauri build
+          command: pnpm tauri build -- ${{ runner.os == 'Linux' && '--bundles deb,rpm' || '' }}
 
       - name: Upload desktop bundle
         uses: actions/upload-artifact@v4
@@ -187,6 +196,8 @@ jobs:
             release-artifacts/**/*.app.tar.gz
             release-artifacts/**/*.app.tar.gz.sig
             release-artifacts/**/*.msi
+            release-artifacts/**/*.deb
+            release-artifacts/**/*.rpm
             release-artifacts/**/*.msi.zip
             release-artifacts/**/*.msi.zip.sig
             release-artifacts/**/*setup.exe
