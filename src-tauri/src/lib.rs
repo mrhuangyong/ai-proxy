@@ -21,6 +21,8 @@ pub mod apps;
 mod update;
 #[cfg(feature = "desktop")]
 mod update_timer;
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+mod tray_linux;
 
 #[cfg(feature = "server")]
 pub mod auth;
@@ -37,9 +39,9 @@ pub fn get_log_layer() -> &'static BroadcastLayer {
 use once_cell::sync::Lazy;
 #[cfg(feature = "desktop")]
 use std::sync::Mutex;
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(target_os = "linux")))]
 use tauri::menu::{Menu, MenuItem};
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(target_os = "linux")))]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 #[cfg(feature = "desktop")]
 use tauri::Emitter;
@@ -212,6 +214,32 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(feature = "desktop")]
+fn spawn_update_check(app: &tauri::AppHandle) {
+    let app_handle = app.clone();
+    let handle = {
+        let guard = APP_RUNTIME.lock().unwrap();
+        guard
+            .as_ref()
+            .expect("runtime not initialized")
+            .handle()
+            .clone()
+    };
+    handle.spawn(async move {
+        match update::check_update(&app_handle).await {
+            Ok(Some(info)) => {
+                let _ = app_handle.emit("update-available", &info);
+            }
+            Ok(None) => {
+                let _ = app_handle.emit("up-to-date", ());
+            }
+            Err(e) => {
+                tracing::warn!("Manual update check failed: {}", e);
+            }
+        }
+    });
+}
+
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 fn set_dock_visibility(visible: bool) {
     use objc2::msg_send;
@@ -330,79 +358,67 @@ pub fn run() {
                 }
                 update_timer::start_update_timer(app.handle().clone());
 
-                let check_update_item = MenuItem::with_id(
-                    app,
-                    "check-update",
-                    "Check for Updates",
-                    true,
-                    None::<&str>,
-                )?;
-                let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-                // Linux tray backends (libappindicator) never emit click events,
-                // so a menu entry is the only way to restore the hidden window.
-                let show_item = MenuItem::with_id(
-                    app,
-                    "show-window",
-                    "Show Main Window",
-                    true,
-                    None::<&str>,
-                )?;
-                let menu = Menu::with_items(app, &[&show_item, &check_update_item, &quit_item])?;
+                // Linux uses a direct StatusNotifierItem (ksni) tray so that
+                // left-click on the icon can restore the hidden window;
+                // tauri's libappindicator backend never emits click events.
+                #[cfg(target_os = "linux")]
+                tray_linux::spawn_tray(app.handle().clone());
 
-                let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let check_update_item = MenuItem::with_id(
+                        app,
+                        "check-update",
+                        "Check for Updates",
+                        true,
+                        None::<&str>,
+                    )?;
+                    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                    let show_item = MenuItem::with_id(
+                        app,
+                        "show-window",
+                        "Show Main Window",
+                        true,
+                        None::<&str>,
+                    )?;
+                    let menu =
+                        Menu::with_items(app, &[&show_item, &check_update_item, &quit_item])?;
 
-                TrayIconBuilder::with_id("main-tray")
-                    .icon(icon)
-                    .tooltip("AI Proxy")
-                    .menu(&menu)
-                    .show_menu_on_left_click(false)
-                    .on_menu_event(move |app, event| {
-                        if event.id() == "show-window" {
-                            #[cfg(target_os = "macos")]
-                            set_dock_visibility(true);
-                            show_main_window(app);
-                        } else if event.id() == "quit" {
-                            stop_proxy();
-                            app.exit(0);
-                        } else if event.id() == "check-update" {
-                            let app_handle = app.clone();
-                            let handle = {
-                                let guard = APP_RUNTIME.lock().unwrap();
-                                guard
-                                    .as_ref()
-                                    .expect("runtime not initialized")
-                                    .handle()
-                                    .clone()
-                            };
-                            handle.spawn(async move {
-                                match update::check_update(&app_handle).await {
-                                    Ok(Some(info)) => {
-                                        let _ = app_handle.emit("update-available", &info);
-                                    }
-                                    Ok(None) => {
-                                        let _ = app_handle.emit("up-to-date", ());
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Manual update check failed: {}", e);
-                                    }
-                                }
-                            });
-                        }
-                    })
-                    .on_tray_icon_event(|tray, event| {
-                        if let TrayIconEvent::Click {
-                            button: MouseButton::Left,
-                            button_state: MouseButtonState::Up,
-                            ..
-                        } = event
-                        {
-                            let app = tray.app_handle();
-                            #[cfg(target_os = "macos")]
-                            set_dock_visibility(true);
-                            show_main_window(app);
-                        }
-                    })
-                    .build(app)?;
+                    let icon =
+                        tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
+
+                    TrayIconBuilder::with_id("main-tray")
+                        .icon(icon)
+                        .tooltip("AI Proxy")
+                        .menu(&menu)
+                        .show_menu_on_left_click(false)
+                        .on_menu_event(move |app, event| {
+                            if event.id() == "show-window" {
+                                #[cfg(target_os = "macos")]
+                                set_dock_visibility(true);
+                                show_main_window(app);
+                            } else if event.id() == "quit" {
+                                stop_proxy();
+                                app.exit(0);
+                            } else if event.id() == "check-update" {
+                                spawn_update_check(app);
+                            }
+                        })
+                        .on_tray_icon_event(|tray, event| {
+                            if let TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } = event
+                            {
+                                let app = tray.app_handle();
+                                #[cfg(target_os = "macos")]
+                                set_dock_visibility(true);
+                                show_main_window(app);
+                            }
+                        })
+                        .build(app)?;
+                }
 
                 Ok(())
             })
