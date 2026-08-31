@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-proxy"
-version = "0.6.70"
+version = "0.6.71"
 dependencies = [
  "async-stream",
  "axum",
