@@ -128,7 +128,7 @@
               <n-input
                 v-model:value="proto.endpoint_path"
                 size="small"
-                :placeholder="`Endpoint，留空使用默认路径（${defaultEndpointHint(proto.format)}）`"
+                :placeholder="endpointPlaceholder(proto.format)"
                 :input-props="{ autocapitalize: 'off' }"
               />
             </div>
@@ -475,7 +475,9 @@ const formatOptions = [
 ]
 
 const DEFAULT_ENDPOINT_BY_FORMAT: Record<string, string> = {
-  completions: '/v1/chat/completions',
+  // Completions 不再带版本段：不同网关前缀各异（/v1、/v4、/api/v3…），
+  // 版本段由 Base URL 或用户显式填写的 Endpoint 提供。
+  completions: '/chat/completions',
   responses: '/v1/responses',
   anthropic: '/v1/messages',
   gemini: '/v1beta/models/{model}:generateContent',
@@ -483,6 +485,13 @@ const DEFAULT_ENDPOINT_BY_FORMAT: Record<string, string> = {
 
 function defaultEndpointHint(format: string): string {
   return DEFAULT_ENDPOINT_BY_FORMAT[format] || ''
+}
+
+function endpointPlaceholder(format: string): string {
+  if (format === 'completions') {
+    return '必填，完整路径随上游而定，例如: /v1/chat/completions'
+  }
+  return `Endpoint，留空使用默认路径（${defaultEndpointHint(format)}）`
 }
 
 const formatColorMap: Record<string, string> = {
@@ -750,6 +759,11 @@ async function handleSubmit() {
   const protoFormats = form.value.protocols.map((p) => p.format)
   if (new Set(protoFormats).size !== protoFormats.length) {
     message.error('上游协议不能重复配置同一格式')
+    return false
+  }
+  // Completions 网关的版本段各异（/v1、/v4、/api/v3…），路径必须显式输入。
+  if (form.value.protocols.some((p) => p.format === 'completions' && !p.endpoint_path.trim())) {
+    message.error('Completions 协议需显式填写 Endpoint（不同上游版本段不同，如 /v1/chat/completions；也可在 Base URL 中带版本段后填 /chat/completions）')
     return false
   }
 

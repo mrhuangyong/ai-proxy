@@ -276,6 +276,21 @@ async fn apply_all_migrations(pool: &SqlitePool) {
             }
         }
     }
+
+    // 029: pin legacy empty-endpoint completions rows to /v1/chat/completions
+    // (idempotent UPDATE — mirrors init.rs).
+    let m29 = include_str!("../migrations/029_completions_endpoint_default.sql");
+    let stripped29: String = m29
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for stmt in stripped29.split(';') {
+        let trimmed = stmt.trim();
+        if !trimmed.is_empty() {
+            sqlx::query(trimmed).execute(pool).await.unwrap();
+        }
+    }
 }
 
 /// `SELECT COUNT(*) > 0 FROM provider_models WHERE typeof(max_output_tokens)='text'

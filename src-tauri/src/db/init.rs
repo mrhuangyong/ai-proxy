@@ -439,6 +439,23 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         }
     }
 
+    // Migration 029: pin legacy empty-endpoint completions rows to the old
+    // /v1/chat/completions default before the default itself drops the
+    // version segment (gateways vary: /v1, /v4, /api/v3 — path is now
+    // user-supplied). Idempotent UPDATE.
+    let migration29 = include_str!("../../migrations/029_completions_endpoint_default.sql");
+    let stripped29: String = migration29
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for stmt in stripped29.split(';') {
+        let trimmed = stmt.trim();
+        if !trimmed.is_empty() {
+            sqlx::query(trimmed).execute(pool).await?;
+        }
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

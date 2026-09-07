@@ -1338,7 +1338,9 @@ fn probe_models_url(base_url: &str, format: &ClientFormat, endpoint_path: Option
         .filter(|p| !p.is_empty() && p.starts_with('/'))
         .map(String::from)
         .unwrap_or_else(|| match format {
-            ClientFormat::Completions => "/v1/chat/completions".into(),
+            // Same version-less default as `default_path_for_format`; the
+            // version segment, when needed, lives in the base URL.
+            ClientFormat::Completions => "/chat/completions".into(),
             ClientFormat::Responses => "/v1/responses".into(),
             ClientFormat::Anthropic => "/v1/messages".into(),
             ClientFormat::Gemini => "/v1beta/models/:generateContent".into(),

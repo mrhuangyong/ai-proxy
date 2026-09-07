@@ -84,8 +84,14 @@ fn parse_all(sm: &mut ResponsesStreamStateMachine, chunks: &[IrStreamChunk]) -> 
     let mut frames = Vec::new();
     for c in chunks {
         for sse in sm.process_chunk(c, (10, 20)) {
-            let trimmed = sse.strip_prefix("data: ").unwrap_or(&sse).trim();
-            frames.push(serde_json::from_str::<Value>(trimmed).expect("valid JSON"));
+            // Frames carry an `event: {type}` line before the data line
+            // (see ResponsesStreamStateMachine::ev) — parse the data line.
+            let data_line = sse
+                .lines()
+                .find(|l| l.trim_start().starts_with("data:"))
+                .map(|l| l.trim_start()["data:".len()..].trim())
+                .unwrap_or_else(|| sse.trim());
+            frames.push(serde_json::from_str::<Value>(data_line).expect("valid JSON"));
         }
     }
     frames

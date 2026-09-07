@@ -547,7 +547,12 @@ pub fn parse_client_format(format: &str) -> Result<ClientFormat, crate::error::P
 
 fn default_path_for_format(format: &ClientFormat, target_model: &str) -> String {
     match format {
-        ClientFormat::Completions => "/v1/chat/completions".to_string(),
+        // No version segment by default: gateways use varying prefixes
+        // (/v1, /v4, /api/v3, ...) so completions users must supply the full
+        // path themselves (or carry the version in the base URL — the join
+        // helper collapses the overlap). Migration 029 pinned legacy
+        // empty-endpoint completions rows to the old /v1 default.
+        ClientFormat::Completions => "/chat/completions".to_string(),
         ClientFormat::Responses => "/v1/responses".to_string(),
         ClientFormat::Anthropic => "/v1/messages".to_string(),
         ClientFormat::Gemini => format!("/v1beta/models/{}:generateContent", target_model),

@@ -135,8 +135,8 @@ async fn qualified_and_bare_model_routing() {
         "empty target_model must fall back to model_name"
     );
     assert_eq!(
-        route.endpoint_path, "/v1/chat/completions",
-        "empty endpoint_path must fall back to default path"
+        route.endpoint_path, "/chat/completions",
+        "empty endpoint_path must fall back to the version-less default (migration 029 pinned legacy rows)"
     );
 
     // Unknown provider / model errors.
