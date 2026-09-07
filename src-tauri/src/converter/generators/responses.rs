@@ -45,6 +45,29 @@ impl FormatGenerator for ResponsesGenerator {
                             }));
                         }
                     }
+                    // Reasoning items must stay type=reasoning (Codex multi-turn
+                    // replay); never fold them into assistant input_text.
+                    for part in &msg.content {
+                        if let IrContentPart::Thinking {
+                            text,
+                            encrypted_content,
+                            ..
+                        } = part
+                        {
+                            let mut item = json!({
+                                "type": "reasoning",
+                                "summary": if text.is_empty() {
+                                    json!([])
+                                } else {
+                                    json!([{"type": "summary_text", "text": text}])
+                                },
+                            });
+                            if let Some(enc) = encrypted_content {
+                                item["encrypted_content"] = json!(enc);
+                            }
+                            input_items.push(item);
+                        }
+                    }
                     let mut item = json!({
                         "role": "assistant",
                     });
@@ -62,7 +85,14 @@ impl FormatGenerator for ResponsesGenerator {
                     if content != json!("") && content != json!([]) {
                         item["content"] = content;
                         input_items.push(item);
-                    } else if msg.tool_calls.is_none() {
+                    } else if msg.tool_calls.is_none()
+                        && !msg.content.iter().any(|p| {
+                            matches!(
+                                p,
+                                IrContentPart::Thinking { .. } | IrContentPart::Compaction { .. }
+                            )
+                        })
+                    {
                         input_items.push(item);
                     }
                 }
@@ -342,24 +372,44 @@ impl FormatGenerator for ResponsesGenerator {
             Some(id) => format!("resp_{}", id),
             None => "resp_proxy".to_string(),
         };
+        let reasoning_id = format!("rs_{}", id);
+        let message_id = format!("msg_{}", id);
 
         let mut output: Vec<Value> = Vec::new();
 
-        let thinking_text = extract_thinking_content(&ir.message.content);
-        if !thinking_text.is_empty() {
-            output.push(json!({
-                "type": "reasoning",
-                "id": "rs_proxy",
-                "summary": [{"type": "summary_text", "text": thinking_text}],
-            }));
+        // Emit one reasoning item per Thinking part so encrypted_content stays
+        // associated with the matching summary text.
+        for part in &ir.message.content {
+            if let IrContentPart::Thinking {
+                text,
+                encrypted_content,
+                ..
+            } = part
+            {
+                let mut item = json!({
+                    "type": "reasoning",
+                    "id": reasoning_id,
+                    "summary": if text.is_empty() {
+                        json!([])
+                    } else {
+                        json!([{"type": "summary_text", "text": text}])
+                    },
+                    "status": "completed",
+                });
+                if let Some(enc) = encrypted_content {
+                    item["encrypted_content"] = json!(enc);
+                }
+                output.push(item);
+            }
         }
 
         let text = extract_text_content(&ir.message.content);
         if !text.is_empty() {
             output.push(json!({
                 "type": "message",
-                "id": "msg_proxy",
+                "id": message_id,
                 "role": "assistant",
+                "status": "completed",
                 "content": [{
                     "type": "output_text",
                     "text": text,
@@ -422,35 +472,38 @@ fn extract_text_content(parts: &[IrContentPart]) -> String {
         .join("")
 }
 
-fn extract_thinking_content(parts: &[IrContentPart]) -> String {
-    parts
-        .iter()
-        .filter_map(|part| match part {
-            IrContentPart::Thinking { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 fn convert_message_content(parts: &[IrContentPart]) -> Value {
-    if parts.len() == 1 {
-        if let Some(IrContentPart::Text { text, .. }) = parts.first() {
+    // Thinking / Compaction are emitted as top-level input items by
+    // generate_request; skip them here so they are not double-emitted as
+    // input_text inside an assistant message.
+    let filtered: Vec<&IrContentPart> = parts
+        .iter()
+        .filter(|p| {
+            !matches!(
+                p,
+                IrContentPart::Thinking { .. } | IrContentPart::Compaction { .. }
+            )
+        })
+        .collect();
+
+    if filtered.len() == 1 {
+        if let Some(IrContentPart::Text { text, .. }) = filtered.first() {
             return json!(text);
         }
     }
 
-    let items: Vec<Value> = parts
+    if filtered.is_empty() {
+        return json!([]);
+    }
+
+    let items: Vec<Value> = filtered
         .iter()
         .map(|part| match part {
             IrContentPart::Text { text, .. } => json!({
                 "type": "input_text",
                 "text": text,
             }),
-            IrContentPart::Thinking { text, .. } => json!({
-                "type": "input_text",
-                "text": text,
-            }),
+            IrContentPart::Thinking { .. } | IrContentPart::Compaction { .. } => unreachable!(),
             IrContentPart::Image {
                 url,
                 data,
@@ -485,14 +538,6 @@ fn convert_message_content(parts: &[IrContentPart]) -> Value {
                 "type": "function_call_output",
                 "call_id": tool_use_id,
                 "output": content,
-            }),
-            IrContentPart::Compaction {
-                id,
-                encrypted_content,
-            } => json!({
-                "type": "compaction",
-                "id": id,
-                "encrypted_content": encrypted_content,
             }),
         })
         .collect();

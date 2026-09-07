@@ -187,6 +187,7 @@ fn case_b_reasoning_then_text_keeps_indices_disjoint() {
             "response.output_item.added",
             "response.reasoning_summary_part.added",
             "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
             "response.reasoning_summary_part.done",
             "response.output_item.done",
             // text message part
@@ -204,32 +205,81 @@ fn case_b_reasoning_then_text_keeps_indices_disjoint() {
     // reasoning item added/done envelope is type=reasoning
     assert_eq!(frames[1]["item"]["type"].as_str(), Some("reasoning"));
     assert_eq!(frames[1]["item"]["id"].as_str(), Some("rs_resp_test"));
-    assert_eq!(frames[5]["item"]["type"].as_str(), Some("reasoning"));
+    assert_eq!(frames[6]["item"]["type"].as_str(), Some("reasoning"));
 
     // reasoning summary events carry item_id so codex can bind them
     assert_eq!(frames[2]["item_id"].as_str(), Some("rs_resp_test"));
     assert_eq!(frames[3]["delta"].as_str(), Some("analyzing..."));
     assert_eq!(frames[3]["item_id"].as_str(), Some("rs_resp_test"));
-    assert_eq!(frames[4]["part"]["text"].as_str(), Some("analyzing..."));
+    assert_eq!(
+        frames[4]["type"].as_str(),
+        Some("response.reasoning_summary_text.done")
+    );
+    assert_eq!(frames[4]["text"].as_str(), Some("analyzing..."));
     assert_eq!(frames[4]["item_id"].as_str(), Some("rs_resp_test"));
+    assert_eq!(frames[5]["part"]["text"].as_str(), Some("analyzing..."));
+    assert_eq!(frames[5]["item_id"].as_str(), Some("rs_resp_test"));
 
     // reasoning item done carries full summary
     assert_eq!(
-        frames[5]["item"]["summary"][0]["text"].as_str(),
+        frames[6]["item"]["summary"][0]["text"].as_str(),
         Some("analyzing...")
     );
 
     // text part still correct + carries unique message item_id
-    assert_eq!(frames[6]["item"]["type"].as_str(), Some("message"));
-    assert_eq!(frames[8]["delta"].as_str(), Some("answer"));
-    assert_eq!(frames[8]["item_id"].as_str(), Some("msg_resp_test"));
-    assert_eq!(frames[9]["text"].as_str(), Some("answer"));
+    assert_eq!(frames[7]["item"]["type"].as_str(), Some("message"));
+    assert_eq!(frames[9]["delta"].as_str(), Some("answer"));
     assert_eq!(frames[9]["item_id"].as_str(), Some("msg_resp_test"));
+    assert_eq!(frames[10]["text"].as_str(), Some("answer"));
+    assert_eq!(frames[10]["item_id"].as_str(), Some("msg_resp_test"));
 
-    // reasoning output_index (0..5) disjoint from message output_index (6..10)
+    // reasoning output_index disjoint from message output_index
     assert_eq!(frames[1]["output_index"].as_i64(), Some(0));
-    assert_eq!(frames[6]["output_index"].as_i64(), Some(1));
+    assert_eq!(frames[7]["output_index"].as_i64(), Some(1));
 
+    assert_strict_sequence(&frames);
+}
+
+#[test]
+fn case_b2_same_chunk_thinking_and_content_both_emitted() {
+    // Anthropic→IR can put thinking + text into one IrStreamChunk; the SM must
+    // not early-return after delta_thinking and drop delta_content.
+    let sm = ResponsesStreamStateMachine::new("resp_test".into(), "m".into());
+    let frames = run(
+        sm,
+        &[
+            IrStreamChunk {
+                id: Some("resp_test".into()),
+                model: None,
+                delta_content: Some("answer".into()),
+                delta_tool_calls: None,
+                delta_thinking: Some("think".into()),
+                finish_reason: None,
+                usage: None,
+                error: None,
+            },
+            finish_completed(),
+        ],
+    );
+    let types: Vec<&str> = frames
+        .iter()
+        .map(|f| f["type"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        types.contains(&"response.reasoning_summary_text.delta"),
+        "thinking must be emitted, got: {:?}",
+        types
+    );
+    assert!(
+        types.contains(&"response.reasoning_summary_text.done"),
+        "summary_text.done must close reasoning before text, got: {:?}",
+        types
+    );
+    assert!(
+        types.contains(&"response.output_text.delta"),
+        "text delta must not be swallowed by thinking early-return, got: {:?}",
+        types
+    );
     assert_strict_sequence(&frames);
 }
 

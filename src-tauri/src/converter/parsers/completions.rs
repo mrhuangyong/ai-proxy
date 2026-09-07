@@ -461,6 +461,7 @@ impl FormatParser for CompletionsParser {
                     IrContentPart::Thinking {
                         text: reasoning.to_string(),
                         signature: None,
+                        encrypted_content: None,
                     },
                 );
             }

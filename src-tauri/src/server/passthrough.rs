@@ -424,10 +424,9 @@ async fn non_stream_response(
     }
 
     // Usage extraction only; parse failures degrade to zero-token logging and
-    // never block the relay. Responses bodies also get the reasoning dialect
-    // fix-up (`normalize_responses_body`) before being relayed, so clients
-    // see the standard `summary` shape instead of the upstream's `content`.
-    let mut relay_bytes = bytes.clone();
+    // never block the relay. Responses bodies are forwarded unchanged (upstream
+    // dialect preserved — no content→summary rewrite on the passthrough path).
+    let relay_bytes = bytes.clone();
     let mut prompt_tokens: i64 = 0;
     let mut completion_tokens: i64 = 0;
     let mut cached_tokens: i64 = 0;
@@ -435,11 +434,8 @@ async fn non_stream_response(
     let mut upstream_usage_events_json: Option<String> = None;
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
         let value = if *client_format == ClientFormat::Responses {
-            let normalized = normalize_responses_body(&value);
-            if normalized != value {
-                relay_bytes = serde_json::to_vec(&normalized).unwrap_or_else(|_| bytes.clone());
-            }
-            normalized
+            // Identity hook kept for call-site symmetry / tests.
+            normalize_responses_body(&value)
         } else {
             value
         };
@@ -499,10 +495,11 @@ async fn non_stream_response(
     response
 }
 
-/// Streaming: relay upstream SSE bytes (with Responses dialect fix-ups, see
-/// `normalize_sse_line`) while scanning lines via the same-format parser,
-/// read-only, for usage totals and upstream error events. Heartbeat /
-/// idle-timeout / logging mirror the conversion-path stream loop.
+/// Streaming: relay upstream SSE bytes byte-for-byte (Responses dialect
+/// preserved; Codex `reasoning_summary_*` remapping lives only on the IR
+/// conversion path) while scanning lines via the same-format parser, read-only,
+/// for usage totals and upstream error events. Heartbeat / idle-timeout /
+/// logging mirror the conversion-path stream loop.
 #[allow(clippy::too_many_arguments)]
 async fn stream_response(
     request_id: &str,
@@ -639,9 +636,8 @@ async fn stream_response(
             }
             chunk_count += 1;
 
-            // Relay the bytes, normalized per complete line (Responses dialect
-            // fix-ups; other formats are byte-for-byte). An incomplete trailing
-            // line stays buffered until its newline arrives.
+            // Relay complete SSE lines as-is. An incomplete trailing line stays
+            // buffered until its newline arrives.
             buffer.extend_from_slice(&chunk);
             let mut out: Vec<u8> = Vec::with_capacity(chunk.len());
             while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
@@ -686,8 +682,12 @@ async fn stream_response(
                         total_completion = usage.completion_tokens;
                     }
                     stream_state_ref.prompt_tokens.store(total_prompt, Ordering::SeqCst);
-                    stream_state_ref.completion_tokens.store(total_completion, Ordering::SeqCst);
-                    stream_state_ref.cached_tokens.store(total_cached, Ordering::SeqCst);
+                    stream_state_ref
+                        .completion_tokens
+                        .store(total_completion, Ordering::SeqCst);
+                    stream_state_ref
+                        .cached_tokens
+                        .store(total_cached, Ordering::SeqCst);
                     if let Some(raw) = &usage.raw {
                         stream_state_ref.usage_events.lock().unwrap().push(raw.clone());
                     }
@@ -852,62 +852,18 @@ pub(crate) fn prepare_upstream(
     (url, body)
 }
 
-/// Responses dialect fix-up on the SSE wire. Some upstreams (verified on
-/// bigmodel / Z.ai, 2026-09-07) stream reasoning under non-standard
-/// `response.reasoning_text.*` event names, while the OpenAI Responses
-/// protocol — and strict clients like codex — only render the
-/// `reasoning_summary_text` family; unrenamed events are silently dropped by
-/// the client ("upstream thinking disappears"). Renames the event in both
-/// `event:` and `data:` lines; any other format or untouched line is returned
-/// byte-for-byte.
-pub(crate) fn normalize_sse_line(format: &ClientFormat, line: &str) -> String {
-    if *format != ClientFormat::Responses || !line.contains("response.reasoning_text") {
-        return line.to_string();
-    }
-    line.replace(
-        "response.reasoning_text.delta",
-        "response.reasoning_summary_text.delta",
-    )
-    .replace(
-        "response.reasoning_text.done",
-        "response.reasoning_summary_text.done",
-    )
+/// Passthrough SSE line hook. Identity: Responses same-protocol relays keep
+/// upstream dialect names (`response.reasoning_text.*`, `content_part` +
+/// `reasoning_text`). Codex `reasoning_summary_*` remapping belongs only on
+/// the IR conversion path (`ResponsesStreamStateMachine`).
+pub(crate) fn normalize_sse_line(_format: &ClientFormat, line: &str) -> String {
+    line.to_string()
 }
 
-/// Non-streaming counterpart of `normalize_sse_line`: rewrites a reasoning
-/// output item's non-standard `content: [{type: "reasoning_text"}]` into the
-/// protocol-standard `summary: [{type: "summary_text"}]`. Returns the input
-/// unchanged when there is nothing to fix.
+/// Passthrough non-stream body hook. Identity: keep upstream reasoning
+/// `content` / `reasoning_text` shape unchanged.
 pub(crate) fn normalize_responses_body(body: &serde_json::Value) -> serde_json::Value {
-    let mut body = body.clone();
-    let output = match body.get_mut("output").and_then(|o| o.as_array_mut()) {
-        Some(o) => o,
-        None => return body,
-    };
-    for item in output.iter_mut() {
-        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
-            continue;
-        }
-        let content = match item.get("content").and_then(|c| c.as_array()) {
-            Some(c) if !c.is_empty() => c.clone(),
-            _ => continue,
-        };
-        let summary: Vec<serde_json::Value> = content
-            .iter()
-            .map(|part| {
-                let mut part = part.clone();
-                if part.get("type").and_then(|t| t.as_str()) == Some("reasoning_text") {
-                    part["type"] = serde_json::Value::String("summary_text".into());
-                }
-                part
-            })
-            .collect();
-        if let Some(obj) = item.as_object_mut() {
-            obj.remove("content");
-        }
-        item["summary"] = serde_json::Value::Array(summary);
-    }
-    body
+    body.clone()
 }
 
 #[cfg(test)]
@@ -1026,31 +982,29 @@ mod reasoning_dialect_tests {
     use super::*;
 
     #[test]
-    fn sse_line_renames_bigmodel_reasoning_events() {
-        // event: line
+    fn sse_line_preserves_bigmodel_reasoning_events() {
         assert_eq!(
             normalize_sse_line(
                 &ClientFormat::Responses,
                 "event: response.reasoning_text.delta\n"
             ),
-            "event: response.reasoning_summary_text.delta\n"
+            "event: response.reasoning_text.delta\n"
         );
-        // data: line (both the type field and the event echo)
         let data = "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"思考\"}\n";
         let out = normalize_sse_line(&ClientFormat::Responses, data);
-        assert!(out.contains("response.reasoning_summary_text.delta"));
-        assert!(!out.contains("response.reasoning_text.delta"));
-        // done event
-        assert!(normalize_sse_line(
-            &ClientFormat::Responses,
+        assert!(out.contains("response.reasoning_text.delta"));
+        assert!(!out.contains("response.reasoning_summary_text"));
+        assert_eq!(
+            normalize_sse_line(
+                &ClientFormat::Responses,
+                "event: response.reasoning_text.done"
+            ),
             "event: response.reasoning_text.done"
-        )
-        .contains("reasoning_summary_text.done"));
+        );
     }
 
     #[test]
     fn sse_line_untouched_for_other_formats_and_lines() {
-        // Anthropic / other formats: byte-for-byte.
         assert_eq!(
             normalize_sse_line(
                 &ClientFormat::Anthropic,
@@ -1058,7 +1012,6 @@ mod reasoning_dialect_tests {
             ),
             "data: {\"type\":\"content_block_delta\"}\n"
         );
-        // Responses but no dialect markers: unchanged.
         assert_eq!(
             normalize_sse_line(
                 &ClientFormat::Responses,
@@ -1073,7 +1026,7 @@ mod reasoning_dialect_tests {
     }
 
     #[test]
-    fn responses_body_rewrites_reasoning_content_to_summary() {
+    fn responses_body_preserves_reasoning_content_dialect() {
         let body = serde_json::json!({
             "id": "resp_1",
             "output": [
@@ -1092,14 +1045,8 @@ mod reasoning_dialect_tests {
             "usage": {"input_tokens": 1, "output_tokens": 2}
         });
         let out = normalize_responses_body(&body);
-        let reasoning = &out["output"][0];
-        assert!(
-            reasoning.get("content").is_none(),
-            "content must be removed"
-        );
-        assert_eq!(reasoning["summary"][0]["type"], "summary_text");
-        assert_eq!(reasoning["summary"][0]["text"], "让我想想");
-        // message item untouched.
+        assert_eq!(out, body);
+        assert_eq!(out["output"][0]["content"][0]["type"], "reasoning_text");
         assert_eq!(out["output"][1]["content"][0]["type"], "output_text");
     }
 
@@ -1114,5 +1061,73 @@ mod reasoning_dialect_tests {
 
         let no_output = serde_json::json!({"error": {"message": "x"}});
         assert_eq!(normalize_responses_body(&no_output), no_output);
+    }
+
+    #[test]
+    fn sse_line_preserves_full_reasoning_text_event_family() {
+        assert_eq!(
+            normalize_sse_line(
+                &ClientFormat::Responses,
+                "event: response.reasoning_text.part.added\n"
+            ),
+            "event: response.reasoning_text.part.added\n"
+        );
+        let data = "data: {\"type\":\"response.reasoning_text.part.done\",\"text\":\"x\"}\n";
+        let out = normalize_sse_line(&ClientFormat::Responses, data);
+        assert!(out.contains("response.reasoning_text.part.done"));
+        assert!(!out.contains("reasoning_summary_text"));
+    }
+
+    #[test]
+    fn responses_body_preserves_encrypted_content_without_rewrite() {
+        let body = serde_json::json!({
+            "id": "resp_1",
+            "output": [{
+                "type": "reasoning",
+                "id": "rs_1",
+                "status": "completed",
+                "encrypted_content": "gAAAAABp-opaque",
+                "content": [{"type": "reasoning_text", "text": "内部思考"}],
+                "summary": []
+            }]
+        });
+        let out = normalize_responses_body(&body);
+        assert_eq!(out, body);
+        assert_eq!(out["output"][0]["encrypted_content"], "gAAAAABp-opaque");
+        assert_eq!(out["output"][0]["content"][0]["type"], "reasoning_text");
+    }
+
+    #[test]
+    fn bare_reasoning_text_deltas_are_not_rewritten() {
+        // Identity helpers: no envelope injection, dialect type names stay.
+        let lines = [
+            "event: response.reasoning_text.delta\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"想\",\"response_id\":\"resp_bm\"}\n",
+            "event: response.reasoning_text.delta\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"一下\",\"response_id\":\"resp_bm\"}\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\",\"response_id\":\"resp_bm\"}\n",
+        ];
+        for line in lines {
+            let out = normalize_sse_line(&ClientFormat::Responses, line);
+            assert_eq!(out, line);
+            assert!(!out.contains("reasoning_summary"));
+        }
+    }
+
+    #[test]
+    fn content_part_reasoning_text_stays_content_part() {
+        let added = "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"item_id\":\"rs_1\",\"content_index\":0,\"part\":{\"type\":\"reasoning_text\",\"text\":\"\"}}\n";
+        let delta = "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"想\"}\n";
+        let done = "data: {\"type\":\"response.content_part.done\",\"output_index\":0,\"item_id\":\"rs_1\",\"content_index\":0,\"part\":{\"type\":\"reasoning_text\",\"text\":\"想\"}}\n";
+        for line in [added, delta, done] {
+            let out = normalize_sse_line(&ClientFormat::Responses, line);
+            assert_eq!(out, line);
+        }
+        assert!(added.contains("content_part.added"));
+        assert!(added.contains("reasoning_text"));
+        assert!(
+            !normalize_sse_line(&ClientFormat::Responses, added).contains("reasoning_summary_part")
+        );
     }
 }

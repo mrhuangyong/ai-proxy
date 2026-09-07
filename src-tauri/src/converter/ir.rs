@@ -99,7 +99,11 @@ pub enum IrContentPart {
     },
     Thinking {
         text: String,
+        /// Anthropic thinking block signature (not Responses encrypted_content).
         signature: Option<String>,
+        /// Opaque encrypted reasoning content from the Responses API.
+        /// Must be passed through verbatim for multi-turn Codex replay.
+        encrypted_content: Option<String>,
     },
     Image {
         url: Option<String>,
