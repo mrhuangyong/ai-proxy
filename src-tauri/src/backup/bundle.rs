@@ -26,6 +26,9 @@ pub struct KdfParams {
 pub struct BackupData {
     #[serde(default)]
     pub providers: Vec<serde_json::Value>,
+    /// Upstream protocol rows (migration 028); absent in pre-028 backups.
+    #[serde(default)]
+    pub provider_protocols: Vec<serde_json::Value>,
     #[serde(default)]
     pub provider_models: Vec<serde_json::Value>,
     #[serde(default)]

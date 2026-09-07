@@ -115,6 +115,93 @@ struct CreateProviderBody {
     upstream_user_agent: Option<String>,
     api_key: String,
     models: Vec<ModelInput>,
+    /// Full upstream protocol list (migration 028). When present it replaces
+    /// the provider's protocols; the primary row is mirrored onto
+    /// `providers.format` / `providers.endpoint_path` for legacy callers.
+    /// Omitted → single-protocol behaviour, unchanged.
+    protocols: Option<Vec<ProtocolInput>>,
+}
+
+/// One upstream protocol entry ({format, base_url?, endpoint_path?, is_primary}).
+#[derive(Deserialize, Clone)]
+struct ProtocolInput {
+    format: String,
+    base_url: Option<String>,
+    endpoint_path: Option<String>,
+    #[serde(default)]
+    is_primary: bool,
+}
+
+/// Validate and normalize a protocol list: at least one entry, valid formats,
+/// no duplicates, exactly one primary (first entry wins when none is marked).
+/// Returns an error string for the API response on failure.
+fn normalize_protocols(protocols: &mut [ProtocolInput]) -> Result<(), String> {
+    if protocols.is_empty() {
+        return Err("至少需要配置一条上游协议".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for p in protocols.iter() {
+        crate::provider::manager::parse_client_format(&p.format)
+            .map_err(|_| format!("无效的协议格式: {}", p.format))?;
+        if !seen.insert(p.format.as_str()) {
+            return Err(format!("协议 '{}' 重复配置", p.format));
+        }
+    }
+    let primary_count = protocols.iter().filter(|p| p.is_primary).count();
+    match primary_count {
+        0 => protocols[0].is_primary = true,
+        1 => {}
+        _ => return Err("只能设置一个默认协议".to_string()),
+    }
+    Ok(())
+}
+
+/// Replace a provider's protocol rows and mirror the primary row onto the
+/// flat `providers.format` / `providers.endpoint_path` columns.
+async fn save_provider_protocols(
+    pool: &sqlx::SqlitePool,
+    provider_id: &str,
+    protocols: &[ProtocolInput],
+) -> Result<(), Json<ApiError>> {
+    sqlx::query("DELETE FROM provider_protocols WHERE provider_id = ?")
+        .bind(provider_id)
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+
+    let mut primary_format: Option<&str> = None;
+    let mut primary_endpoint: Option<String> = None;
+    for p in protocols {
+        sqlx::query(
+            "INSERT INTO provider_protocols (id, provider_id, format, base_url, endpoint_path, is_primary) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(provider_id)
+        .bind(&p.format)
+        .bind(p.base_url.as_deref().filter(|s| !s.is_empty()))
+        .bind(p.endpoint_path.as_deref().filter(|s| !s.is_empty()))
+        .bind(p.is_primary as i64)
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+        if p.is_primary {
+            primary_format = Some(&p.format);
+            primary_endpoint = p.endpoint_path.clone().filter(|s| !s.is_empty());
+        }
+    }
+
+    if let Some(fmt) = primary_format {
+        sqlx::query(
+            "UPDATE providers SET format = ?, endpoint_path = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(fmt)
+        .bind(primary_endpoint)
+        .bind(provider_id)
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -204,6 +291,24 @@ async fn create_provider(
         .bind(&key_id).bind(&id).bind(&body.name).bind(&encrypted).bind(&nonce.as_slice())
         .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
 
+    if let Some(mut protocols) = body.protocols.clone() {
+        normalize_protocols(&mut protocols).map_err(err_json)?;
+        save_provider_protocols(pool, &id, &protocols).await?;
+    } else {
+        // Legacy single-protocol create: seed the primary row so
+        // provider_protocols stays authoritative for routing.
+        sqlx::query(
+            "INSERT INTO provider_protocols (id, provider_id, format, base_url, endpoint_path, is_primary) VALUES (?, ?, ?, NULL, ?, 1)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&id)
+        .bind(&body.format)
+        .bind(body.endpoint_path.as_deref().filter(|s| !s.is_empty()))
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    }
+
     mark_sync_dirty(pool).await;
     Ok(ok(id))
 }
@@ -217,6 +322,9 @@ struct UpdateProviderBody {
     upstream_user_agent: Option<String>,
     api_key: Option<String>,
     models: Option<Vec<ModelInput>>,
+    /// Full protocol list replacement (see `CreateProviderBody`). Omitted →
+    /// protocols untouched; the flat format/endpoint_path fields keep working.
+    protocols: Option<Vec<ProtocolInput>>,
 }
 
 async fn update_provider(
@@ -234,8 +342,8 @@ async fn update_provider(
 
     let name = body.name.unwrap_or(current.0);
     let base_url = body.base_url.unwrap_or(current.1);
-    let format = body.format.unwrap_or(current.2);
-    let endpoint_path = body.endpoint_path.unwrap_or(current.3);
+    let format = body.format.clone().unwrap_or(current.2);
+    let endpoint_path = body.endpoint_path.clone().unwrap_or(current.3);
     let upstream_user_agent = body.upstream_user_agent.unwrap_or(current.4);
 
     validate_provider_name(&name)?;
@@ -249,6 +357,33 @@ async fn update_provider(
 
     if let Some(models) = body.models {
         update_provider_models(pool, &id, &models).await?;
+    }
+
+    if let Some(mut protocols) = body.protocols.clone() {
+        normalize_protocols(&mut protocols).map_err(err_json)?;
+        save_provider_protocols(pool, &id, &protocols).await?;
+    } else if body.format.is_some() || body.endpoint_path.is_some() {
+        // Legacy flat update without a protocol list: keep the primary row in
+        // sync so routing (which prefers provider_protocols) agrees with the
+        // flat columns. Drop any non-primary row that would now collide with
+        // the new primary format (UNIQUE(provider_id, format)).
+        sqlx::query(
+            "DELETE FROM provider_protocols WHERE provider_id = ? AND format = ? AND is_primary = 0",
+        )
+        .bind(&id)
+        .bind(&format)
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+        sqlx::query(
+            "UPDATE provider_protocols SET format = ?, endpoint_path = ? WHERE provider_id = ? AND is_primary = 1",
+        )
+        .bind(&format)
+        .bind(endpoint_path.as_deref().filter(|s| !s.is_empty()))
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
     }
 
     if let Some(ref plaintext_key) = body.api_key {
@@ -496,6 +631,7 @@ struct LogEntry {
     final_usage_json: Option<String>,
     upstream_usage_events_json: Option<String>,
     client_user_agent: Option<String>,
+    is_passthrough: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -555,7 +691,7 @@ async fn list_logs(
         }
     }
 
-    let select_cols = "id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json, client_user_agent";
+    let select_cols = "id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json, client_user_agent, is_passthrough";
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -609,6 +745,7 @@ async fn list_logs(
             final_usage_json: row.get(17),
             upstream_usage_events_json: row.get(18),
             client_user_agent: row.get(19),
+            is_passthrough: row.get::<i32, _>(20) != 0,
         })
         .collect();
 
@@ -621,7 +758,7 @@ async fn list_logs(
 async fn get_log(Path(id): Path<i64>) -> Result<Json<ApiResponse<LogEntry>>, Json<ApiError>> {
     let pool = get_pool().await;
     let row = sqlx::query(
-        "SELECT id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json, client_user_agent FROM request_logs WHERE id = ?",
+        "SELECT id, request_id, client_format, provider_name, provider_format, model, target_model, stream, status_code, duration_ms, prompt_tokens, completion_tokens, total_tokens, error_message, cached_tokens, ttft_ms, created_at, final_usage_json, upstream_usage_events_json, client_user_agent, is_passthrough FROM request_logs WHERE id = ?",
     )
     .bind(id)
     .fetch_one(pool).await.map_err(|e| err_json(e.to_string()))?;
@@ -647,6 +784,7 @@ async fn get_log(Path(id): Path<i64>) -> Result<Json<ApiResponse<LogEntry>>, Jso
         final_usage_json: row.get(17),
         upstream_usage_events_json: row.get(18),
         client_user_agent: row.get(19),
+        is_passthrough: row.get::<i32, _>(20) != 0,
     }))
 }
 
@@ -990,12 +1128,13 @@ struct Settings {
     upstream_invisible_retry_total_timeout_secs: String,
     upstream_invisible_retry_buffer_limit_mb: String,
     upstream_user_agent: String,
+    passthrough_enabled: String,
 }
 
 async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
     let pool = get_pool().await;
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT key, value FROM settings WHERE key IN ('http_port', 'log_retention_days', 'record_request_body', 'proxy_auth_enabled', 'proxy_auth_key', 'request_timeout', 'connect_timeout', 'max_request_body_mb', 'codex_preserve_auth', 'upstream_max_retries', 'upstream_retry_backoff_base_ms', 'extract_system_from_messages', 'upstream_invisible_retry_mode', 'upstream_invisible_retry_total_timeout_secs', 'upstream_invisible_retry_buffer_limit_mb', 'upstream_user_agent')"
+        "SELECT key, value FROM settings WHERE key IN ('http_port', 'log_retention_days', 'record_request_body', 'proxy_auth_enabled', 'proxy_auth_key', 'request_timeout', 'connect_timeout', 'max_request_body_mb', 'codex_preserve_auth', 'upstream_max_retries', 'upstream_retry_backoff_base_ms', 'extract_system_from_messages', 'upstream_invisible_retry_mode', 'upstream_invisible_retry_total_timeout_secs', 'upstream_invisible_retry_buffer_limit_mb', 'upstream_user_agent', 'passthrough_enabled')"
     ).fetch_all(pool).await.map_err(|e| err_json(e.to_string()))?;
 
     let map: HashMap<String, String> = rows.into_iter().collect();
@@ -1058,6 +1197,10 @@ async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
             .cloned()
             .unwrap_or_else(|| "32".into()),
         upstream_user_agent: map.get("upstream_user_agent").cloned().unwrap_or_default(),
+        passthrough_enabled: map
+            .get("passthrough_enabled")
+            .cloned()
+            .unwrap_or_else(|| "true".into()),
     }))
 }
 
@@ -1079,6 +1222,7 @@ struct UpdateSettingsBody {
     upstream_invisible_retry_total_timeout_secs: Option<String>,
     upstream_invisible_retry_buffer_limit_mb: Option<String>,
     upstream_user_agent: Option<String>,
+    passthrough_enabled: Option<String>,
 }
 
 async fn update_settings(
@@ -1117,6 +1261,7 @@ async fn update_settings(
             body.upstream_invisible_retry_buffer_limit_mb,
         ),
         ("upstream_user_agent", body.upstream_user_agent),
+        ("passthrough_enabled", body.passthrough_enabled),
     ];
     for (key, value) in updates {
         if let Some(v) = value {
@@ -1215,12 +1360,14 @@ fn probe_models_url(base_url: &str, format: &ClientFormat, endpoint_path: Option
         .map(str::to_string)
         .unwrap_or_else(|| "/v1".into()),
     };
-    format!("{base}{root}/models")
+    crate::provider::manager::join_base_url_and_path(base, &format!("{root}/models"))
 }
 
 /// Decrypt the provider's next rotated key for management-side upstream calls.
 /// Ok(None) when no provider id was given.
-async fn stored_provider_key(provider_id: Option<&str>) -> Result<Option<String>, (String, String)> {
+async fn stored_provider_key(
+    provider_id: Option<&str>,
+) -> Result<Option<String>, (String, String)> {
     let pid = match provider_id {
         Some(p) => p,
         None => return Ok(None),
@@ -1229,7 +1376,10 @@ async fn stored_provider_key(provider_id: Option<&str>) -> Result<Option<String>
         .await
         .map_err(|e| ("未找到可用的 API Key".into(), e.to_string()))?;
     if selected.nonce.len() != 12 {
-        return Err(("已存 API Key 的 Nonce 格式错误".into(), "invalid nonce length".into()));
+        return Err((
+            "已存 API Key 的 Nonce 格式错误".into(),
+            "invalid nonce length".into(),
+        ));
     }
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&selected.nonce);
@@ -1525,11 +1675,8 @@ async fn test_model(
         }
     };
 
-    let url = format!(
-        "{}{}",
-        route.base_url.trim_end_matches('/'),
-        route.endpoint_path
-    );
+    let url =
+        crate::provider::manager::join_base_url_and_path(&route.base_url, &route.endpoint_path);
 
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -1602,6 +1749,7 @@ async fn test_model(
                 0,
                 None,
                 None,
+                false,
             )
             .await;
             return Ok(ok(TestModelResult {
@@ -1652,6 +1800,7 @@ async fn test_model(
             0,
             None,
             None,
+            false,
         )
         .await;
         return Ok(ok(TestModelResult {
@@ -1709,6 +1858,7 @@ async fn test_model(
         0,
         None,
         None,
+        false,
     )
     .await;
 
@@ -2227,10 +2377,7 @@ pub fn api_routes() -> axum::Router {
         .route("/usage", axum::routing::get(get_usage).delete(clear_usage))
         .route("/usage/trend", axum::routing::get(get_usage_trend))
         .route("/models/test", axum::routing::post(test_model))
-        .route(
-            "/providers/probe-models",
-            axum::routing::post(probe_models),
-        )
+        .route("/providers/probe-models", axum::routing::post(probe_models))
         .route("/rules", axum::routing::get(list_rules).post(create_rule))
         .route("/rules/:id", routing::put(update_rule).delete(delete_rule))
         .route(
@@ -2392,5 +2539,50 @@ mod tests {
         ] {
             assert!(validate_provider_name(name).is_err(), "{name} should fail");
         }
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::{normalize_protocols, ProtocolInput};
+
+    fn input(format: &str, is_primary: bool) -> ProtocolInput {
+        ProtocolInput {
+            format: format.to_string(),
+            base_url: None,
+            endpoint_path: None,
+            is_primary,
+        }
+    }
+
+    #[test]
+    fn rejects_empty_duplicate_and_multiple_primary() {
+        assert!(normalize_protocols(&mut []).is_err());
+        assert!(normalize_protocols(&mut [
+            input("completions", true),
+            input("completions", false)
+        ])
+        .is_err());
+        assert!(
+            normalize_protocols(&mut [input("completions", true), input("anthropic", true)])
+                .is_err()
+        );
+        assert!(normalize_protocols(&mut [input("bogus", true)]).is_err());
+    }
+
+    #[test]
+    fn defaults_first_row_to_primary_when_unmarked() {
+        let mut protocols = [input("anthropic", false), input("completions", false)];
+        normalize_protocols(&mut protocols).unwrap();
+        assert!(protocols[0].is_primary);
+        assert!(!protocols[1].is_primary);
+    }
+
+    #[test]
+    fn accepts_valid_list_with_single_primary() {
+        let mut protocols = [input("completions", false), input("anthropic", true)];
+        normalize_protocols(&mut protocols).unwrap();
+        assert!(!protocols[0].is_primary);
+        assert!(protocols[1].is_primary);
     }
 }

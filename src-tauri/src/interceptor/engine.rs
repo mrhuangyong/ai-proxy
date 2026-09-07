@@ -232,20 +232,31 @@ impl InterceptorEngine {
         }
     }
 
+    /// Execute pre-phase rules. Returns `true` when a body-level action
+    /// (InjectSystemPrompt / OverrideParameter) was applied to the IR — the
+    /// passthrough fast-path must not fire for such requests, since those
+    /// actions only have meaning in the converted (IR) body.
     pub async fn execute_pre_rules(
         request: &mut IrRequest,
         path: &str,
         headers: &mut HashMap<String, String>,
-    ) -> Result<(), ProxyError> {
+    ) -> Result<bool, ProxyError> {
         let rules = Self::load_rules(&RulePhase::Pre).await?;
+        let mut applied_body_action = false;
 
         for rule in &rules {
             if Self::check_condition(&rule.condition, request, path, headers) {
                 tracing::info!("Applying pre-rule: {} ({})", rule.name, rule.id);
+                if matches!(
+                    rule.action,
+                    RuleAction::InjectSystemPrompt { .. } | RuleAction::OverrideParameter { .. }
+                ) {
+                    applied_body_action = true;
+                }
                 Self::apply_action(&rule.action, request, headers);
             }
         }
 
-        Ok(())
+        Ok(applied_body_action)
     }
 }

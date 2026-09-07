@@ -17,12 +17,12 @@ pub mod virtual_model;
 
 #[cfg(feature = "desktop")]
 pub mod apps;
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+mod tray_linux;
 #[cfg(feature = "desktop")]
 mod update;
 #[cfg(feature = "desktop")]
 mod update_timer;
-#[cfg(all(feature = "desktop", target_os = "linux"))]
-mod tray_linux;
 
 #[cfg(feature = "server")]
 pub mod auth;

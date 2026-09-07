@@ -172,11 +172,13 @@ const columns = [
   {
     title: '请求格式',
     key: 'format',
-    width: 170,
+    width: 190,
     render: (row: RequestLog) =>
       h(NSpace, { size: 4, align: 'center' }, () => [
         h(NTag, { size: 'small', type: 'info' }, () => row.client_format),
-        h('span', { style: 'color: var(--text-3); font-size: 12px' }, () => '→'),
+        row.is_passthrough
+          ? h(NTag, { size: 'small', type: 'success', bordered: false }, () => '直通')
+          : h('span', { style: 'color: var(--text-3); font-size: 12px' }, () => '→'),
         h(NTag, { size: 'small', type: 'warning' }, () => row.provider_format),
       ]),
   },

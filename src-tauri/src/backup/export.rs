@@ -27,6 +27,7 @@ pub async fn export_bundle_with_passphrase(
     let mut data = BackupData::default();
     let empty: &[&str] = &[];
     data.providers = read_table(pool, "providers", empty).await?;
+    data.provider_protocols = read_table(pool, "provider_protocols", empty).await?;
     data.provider_models = read_table(pool, "provider_models", empty).await?;
     data.api_keys = read_table(pool, "api_keys", API_KEY_BLOB_COLS).await?;
     data.interceptor_rules = read_table(pool, "interceptor_rules", empty).await?;

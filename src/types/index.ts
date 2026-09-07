@@ -1,13 +1,27 @@
+export type ProviderFormat = 'completions' | 'responses' | 'anthropic' | 'gemini'
+
+/** One upstream protocol a provider speaks (base_url/endpoint optionally override the provider defaults). */
+export interface ProviderProtocol {
+  format: ProviderFormat
+  /** Empty/null → use the provider-level base_url. */
+  base_url?: string | null
+  /** Empty/null → the default path for the format. */
+  endpoint_path?: string | null
+  /** Primary protocol = conversion target when the client protocol has no match. */
+  is_primary: boolean
+}
+
 export interface Provider {
   id: string
   name: string
   base_url: string
-  format: 'completions' | 'responses' | 'anthropic' | 'gemini'
+  format: ProviderFormat
   endpoint_path?: string | null
   upstream_user_agent?: string
   enabled: boolean
   models: ProviderModel[]
   api_keys: ApiKeyInfo[]
+  protocols: ProviderProtocol[]
 }
 
 export interface ModelCapabilities {
@@ -69,6 +83,7 @@ export interface RequestLog {
   final_usage_json?: string | null
   upstream_usage_events_json?: string | null
   client_user_agent?: string | null
+  is_passthrough?: boolean
 }
 
 export interface UsageSummary {

@@ -9,11 +9,10 @@
 use sqlx::FromRow;
 use tracing::{info, warn};
 
-use crate::converter::ir::ClientFormat;
 use crate::converter::sanitize::ModelCapabilities;
 use crate::db::get_pool;
 use crate::error::ProxyError;
-use crate::provider::manager::{parse_client_format, ResolvedRoute};
+use crate::provider::manager::{ProviderManager, ResolvedRoute};
 
 /// A resolved route plus the mapping id used to track success/failure.
 #[derive(Debug, Clone)]
@@ -200,19 +199,22 @@ impl VirtualRouter {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => c.model_name.clone(),
         };
-        let target_format = parse_client_format(&c.format)?;
-        // Empty-string endpoint_path treated as unset → default per-format path.
-        let endpoint_path = c
-            .endpoint_path
-            .filter(|p| !p.is_empty())
-            .map(|p| {
-                if p.starts_with('/') {
-                    p
-                } else {
-                    format!("/{}", p)
-                }
-            })
-            .unwrap_or_else(|| default_path_for_format(&target_format, &target_model));
+        let protocols = ProviderManager::resolve_protocols_for(
+            &c.provider_id,
+            &c.base_url,
+            &c.format,
+            c.endpoint_path.clone(),
+            &target_model,
+        )
+        .await?;
+        // The primary protocol row mirrors providers.format/endpoint_path; it
+        // is the conversion target when the client protocol has no match.
+        let primary = protocols
+            .iter()
+            .find(|p| p.is_primary)
+            .expect("resolve_protocols_for guarantees a primary entry");
+        let target_format = primary.format.clone();
+        let endpoint_path = primary.endpoint_path.clone();
 
         info!(
             "[failover] {} -> {} ({}) [mapping={}]",
@@ -229,6 +231,7 @@ impl VirtualRouter {
                 endpoint_path,
                 upstream_user_agent: c.upstream_user_agent,
                 capabilities: caps,
+                protocols,
             },
             mapping_id: c.mapping_id,
             virtual_name: virtual_name.to_string(),
@@ -377,14 +380,5 @@ impl VirtualRouter {
         .fetch_all(pool)
         .await
         .unwrap_or_default()
-    }
-}
-
-fn default_path_for_format(format: &ClientFormat, target_model: &str) -> String {
-    match format {
-        ClientFormat::Completions => "/v1/chat/completions".to_string(),
-        ClientFormat::Responses => "/v1/responses".to_string(),
-        ClientFormat::Anthropic => "/v1/messages".to_string(),
-        ClientFormat::Gemini => format!("/v1beta/models/{}:generateContent", target_model),
     }
 }

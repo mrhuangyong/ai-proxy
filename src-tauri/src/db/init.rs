@@ -396,6 +396,49 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 027: repair NULL→'' in nullable INTEGER columns");
     }
 
+    // Migration 028: multi-protocol upstreams — provider_protocols table +
+    // passthrough flag on request_logs. Idempotent via existence checks so a
+    // partially-applied run (table created, ALTER not yet) completes cleanly.
+    let has_provider_protocols: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'provider_protocols'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_provider_protocols {
+        let migration28 = include_str!("../../migrations/028_provider_protocols.sql");
+        let stripped: String = migration28
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await?;
+            }
+        }
+        info!("Applied migration 028: provider protocols + request_logs.is_passthrough");
+    } else {
+        // Table exists: make sure the request_logs column also exists (partial
+        // application recovery).
+        let has_pt_col: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('request_logs') WHERE name = 'is_passthrough'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        if !has_pt_col {
+            sqlx::query(
+                "ALTER TABLE request_logs ADD COLUMN is_passthrough INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(pool)
+            .await?;
+            info!("Applied migration 028 (partial): request_logs.is_passthrough");
+        }
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

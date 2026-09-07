@@ -13,6 +13,21 @@ pub struct Provider {
     pub upstream_user_agent: String,
     pub models: Vec<ProviderModel>,
     pub api_keys: Vec<ApiKeyInfo>,
+    /// Upstream protocols this provider speaks. The primary row mirrors
+    /// `format` / `endpoint_path`; extra rows enable direct passthrough when
+    /// the downstream client protocol matches (migration 028).
+    #[serde(default)]
+    pub protocols: Vec<ProviderProtocol>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderProtocol {
+    pub format: String,
+    /// Empty/None → use the provider-level `base_url`.
+    pub base_url: Option<String>,
+    /// Empty/None → the default path for `format`.
+    pub endpoint_path: Option<String>,
+    pub is_primary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

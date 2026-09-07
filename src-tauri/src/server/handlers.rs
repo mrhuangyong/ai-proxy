@@ -209,9 +209,15 @@ pub async fn handle_anthropic_count_tokens(request: Request) -> Response {
         forward_body["model"] = Value::String(route.target_model.clone());
     }
 
-    let url = format!(
-        "{}/v1/messages/count_tokens",
-        route.base_url.trim_end_matches('/')
+    // Prefer the anthropic protocol's effective base URL when the provider
+    // speaks Anthropic natively (it may override the provider-level default).
+    let count_tokens_base = route
+        .protocol_for(&ClientFormat::Anthropic)
+        .map(|p| p.base_url.clone())
+        .unwrap_or_else(|| route.base_url.clone());
+    let url = crate::provider::manager::join_base_url_and_path(
+        &count_tokens_base,
+        "/v1/messages/count_tokens",
     );
     info!("[count_tokens] Upstream: POST {}", url);
 
@@ -363,6 +369,7 @@ pub(crate) async fn handle_proxy_inner(
                 0,
                 None,
                 client_user_agent.as_deref(),
+                false,
             )
             .await
             {
@@ -396,6 +403,7 @@ pub(crate) async fn handle_proxy_inner(
                 0,
                 None,
                 client_user_agent.as_deref(),
+                false,
             )
             .await
             {
@@ -555,6 +563,7 @@ pub(crate) async fn handle_proxy_inner(
                 0,
                 None,
                 client_user_agent.as_deref(),
+                false,
             )
             .await
             {
@@ -577,11 +586,22 @@ pub(crate) async fn handle_proxy_inner(
     let path = parts.uri.path().to_string();
     let client_model = ir_request.model.clone();
 
-    if let Err(e) =
-        InterceptorEngine::execute_pre_rules(&mut ir_request, &path, &mut extra_headers).await
+    // `true` when a body-level rule (system-prompt injection / parameter
+    // override) fired — such requests must keep going through the IR
+    // conversion path instead of the passthrough fast-path.
+    let applied_body_rule = match InterceptorEngine::execute_pre_rules(
+        &mut ir_request,
+        &path,
+        &mut extra_headers,
+    )
+    .await
     {
-        error!("Interceptor error: {}", e);
-    }
+        Ok(applied) => applied,
+        Err(e) => {
+            error!("Interceptor error: {}", e);
+            false
+        }
+    };
 
     let mut route = if let Some(r) = pre_resolved {
         info!(
@@ -635,6 +655,7 @@ pub(crate) async fn handle_proxy_inner(
                     0,
                     None,
                     client_user_agent.as_deref(),
+                    false,
                 )
                 .await
                 {
@@ -686,6 +707,7 @@ pub(crate) async fn handle_proxy_inner(
                     0,
                     None,
                     client_user_agent.as_deref(),
+                    false,
                 )
                 .await
                 {
@@ -720,6 +742,7 @@ pub(crate) async fn handle_proxy_inner(
             0,
             None,
             client_user_agent.as_deref(),
+            false,
         )
         .await
         {
@@ -752,6 +775,7 @@ pub(crate) async fn handle_proxy_inner(
                 0,
                 None,
                 client_user_agent.as_deref(),
+                false,
             )
             .await
             {
@@ -773,6 +797,39 @@ pub(crate) async fn handle_proxy_inner(
         };
         if !final_ua.is_empty() {
             extra_headers.insert("user-agent".to_string(), final_ua.to_string());
+        }
+    }
+
+    // Passthrough fast-path: when the provider speaks the client's protocol,
+    // forward the original body as-is instead of converting through the IR.
+    // Skipped when body-level interceptor rules fired (their effects only
+    // exist in the converted body) or when the global switch is off.
+    if !applied_body_rule && crate::server::passthrough::passthrough_enabled().await {
+        if let Some(protocol) = route.protocol_for(&client_format) {
+            let protocol = protocol.clone();
+            tracing::info!(
+                "[passthrough] {} speaks {:?} natively — forwarding as-is",
+                route.provider_name,
+                client_format
+            );
+            return crate::server::passthrough::forward(
+                crate::server::passthrough::PassthroughContext {
+                    route: route.clone(),
+                    protocol,
+                    client_format: client_format.clone(),
+                    body: body_value.clone(),
+                    stream: ir_request.stream,
+                    client_model: client_model.clone(),
+                    extra_headers: extra_headers.clone(),
+                    api_key: api_key.clone(),
+                    endpoint_override: endpoint_override.map(String::from),
+                    failover_ctx: failover_ctx.clone(),
+                    request_id: request_id.clone(),
+                    start,
+                    client_user_agent: client_user_agent.clone(),
+                },
+            )
+            .await;
         }
     }
 
@@ -880,6 +937,7 @@ pub(crate) async fn handle_proxy_inner(
                 0,
                 None,
                 client_user_agent.as_deref(),
+                false,
             )
             .await
             {
@@ -904,11 +962,8 @@ pub(crate) async fn handle_proxy_inner(
         }
     }
 
-    let mut url = format!(
-        "{}{}",
-        route.base_url.trim_end_matches('/'),
-        route.endpoint_path
-    );
+    let mut url =
+        crate::provider::manager::join_base_url_and_path(&route.base_url, &route.endpoint_path);
 
     if client_format == ClientFormat::Gemini && ir_request.stream {
         url = url.replace(":generateContent", ":streamGenerateContent");
@@ -1093,6 +1148,7 @@ pub(crate) async fn handle_proxy_inner(
                         retry_count as i64,
                         Some(&last_error),
                         client_user_agent.as_deref(),
+                        false,
                     )
                     .await;
                     return response;
@@ -1131,6 +1187,7 @@ pub(crate) async fn handle_proxy_inner(
                 retry_count as i64,
                 Some(&last_error),
                 client_user_agent.as_deref(),
+                false,
             )
             .await
             {
@@ -1164,6 +1221,7 @@ pub(crate) async fn handle_proxy_inner(
                 0,
                 None,
                 client_user_agent.as_deref(),
+                false,
             )
             .await
             {
@@ -1222,6 +1280,7 @@ pub(crate) async fn handle_proxy_inner(
             0,
             None,
             client_user_agent.as_deref(),
+            false,
         )
         .await
         {
@@ -1370,6 +1429,7 @@ pub(crate) async fn handle_proxy_inner(
             retry_count_for_log as i64,
             last_error_for_log.as_deref(),
             client_user_agent.as_deref(),
+            false,
         )
         .await
         {
@@ -1450,6 +1510,7 @@ pub(crate) async fn handle_proxy_inner(
             upstream_retry_count: retry_count_for_log as i64,
             upstream_last_error: last_error_for_log.clone(),
             client_user_agent: client_user_agent.clone(),
+            is_passthrough: false,
             failover_mapping_id: failover_ctx.as_ref().map(|c| c.mapping_id.clone()),
             failover_threshold: failover_ctx.as_ref().map(|c| c.threshold).unwrap_or(0),
         });
@@ -2086,6 +2147,7 @@ pub(crate) async fn handle_proxy_inner(
                 retry_count_for_log as i64,
                 last_error_for_log.as_deref(),
                 stream_state_ref.client_user_agent.as_deref(),
+                stream_state_ref.is_passthrough,
             )
             .await
             {
@@ -2108,7 +2170,7 @@ pub(crate) async fn handle_proxy_inner(
     }
 }
 
-fn get_parser(format: &ClientFormat) -> Box<dyn FormatParser> {
+pub(crate) fn get_parser(format: &ClientFormat) -> Box<dyn FormatParser> {
     match format {
         ClientFormat::Completions => Box::new(CompletionsParser),
         ClientFormat::Responses => Box::new(ResponsesParser),
@@ -2438,6 +2500,11 @@ fn extract_text_from_html(html: &str, max_len: usize) -> String {
 
 /// Read a single setting value from the settings table (returns None if missing).
 async fn get_setting(key: &str) -> Option<String> {
+    get_setting_pub(key).await
+}
+
+/// Shared read-only settings accessor (also used by the passthrough module).
+pub(crate) async fn get_setting_pub(key: &str) -> Option<String> {
     let pool = crate::db::get_pool().await;
     sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
         .bind(key)
@@ -2467,7 +2534,7 @@ fn extract_headers(header_map: &axum::http::HeaderMap, headers: &mut HashMap<Str
     }
 }
 
-async fn log_request_entry(
+pub(crate) async fn log_request_entry(
     request_id: &str,
     client_format: &ClientFormat,
     provider_name: &str,
@@ -2487,6 +2554,7 @@ async fn log_request_entry(
     upstream_retry_count: i64,
     upstream_last_error: Option<&str>,
     client_user_agent: Option<&str>,
+    is_passthrough: bool,
 ) -> Result<(), ProxyError> {
     log_request(
         request_id,
@@ -2508,41 +2576,44 @@ async fn log_request_entry(
         upstream_retry_count,
         upstream_last_error,
         client_user_agent,
+        is_passthrough,
     )
     .await
 }
 
-struct StreamLogState {
-    request_id: String,
-    client_format: ClientFormat,
-    provider_name: String,
-    provider_format: ClientFormat,
-    model: String,
-    target_model: String,
-    start: std::time::Instant,
-    prompt_tokens: AtomicU32,
-    completion_tokens: AtomicU32,
-    cached_tokens: AtomicU32,
-    ttft_ms: Mutex<Option<i64>>,
+pub(crate) struct StreamLogState {
+    pub(crate) request_id: String,
+    pub(crate) client_format: ClientFormat,
+    pub(crate) provider_name: String,
+    pub(crate) provider_format: ClientFormat,
+    pub(crate) model: String,
+    pub(crate) target_model: String,
+    pub(crate) start: std::time::Instant,
+    pub(crate) prompt_tokens: AtomicU32,
+    pub(crate) completion_tokens: AtomicU32,
+    pub(crate) cached_tokens: AtomicU32,
+    pub(crate) ttft_ms: Mutex<Option<i64>>,
     /// Raw upstream usage events captured during streaming (in arrival order).
-    usage_events: Mutex<Vec<serde_json::Value>>,
+    pub(crate) usage_events: Mutex<Vec<serde_json::Value>>,
     /// Final accumulated upstream usage snapshot (set at stream end).
-    final_usage: Mutex<Option<serde_json::Value>>,
-    logged: AtomicBool,
-    interrupted: AtomicBool,
-    upstream_retry_count: i64,
-    upstream_last_error: Option<String>,
+    pub(crate) final_usage: Mutex<Option<serde_json::Value>>,
+    pub(crate) logged: AtomicBool,
+    pub(crate) interrupted: AtomicBool,
+    pub(crate) upstream_retry_count: i64,
+    pub(crate) upstream_last_error: Option<String>,
     /// Downstream (client) User-Agent, captured at request entry for logging.
-    client_user_agent: Option<String>,
+    pub(crate) client_user_agent: Option<String>,
+    /// True when this request was forwarded as-is (protocol passthrough).
+    pub(crate) is_passthrough: bool,
     /// When Some, record success/failure against this virtual-model mapping
     /// when the stream ends. Populated from `FailoverContext` on the
     /// `/failover/...` path so mid-stream failures are counted.
-    failover_mapping_id: Option<String>,
-    failover_threshold: u32,
+    pub(crate) failover_mapping_id: Option<String>,
+    pub(crate) failover_threshold: u32,
 }
 
-struct StreamLoggingGuard {
-    state: Arc<StreamLogState>,
+pub(crate) struct StreamLoggingGuard {
+    pub(crate) state: Arc<StreamLogState>,
 }
 
 impl Drop for StreamLoggingGuard {
@@ -2598,6 +2669,7 @@ impl Drop for StreamLoggingGuard {
                 state.upstream_retry_count,
                 state.upstream_last_error.as_deref(),
                 state.client_user_agent.as_deref(),
+                state.is_passthrough,
             )
             .await
             {

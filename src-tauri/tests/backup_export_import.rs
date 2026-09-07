@@ -259,6 +259,23 @@ async fn apply_all_migrations(pool: &SqlitePool) {
             }
         }
     }
+
+    // 028: provider_protocols + request_logs.is_passthrough (guarded,
+    // multi-statement — mirrors init.rs).
+    if !has_table(pool, "provider_protocols").await {
+        let m28 = include_str!("../migrations/028_provider_protocols.sql");
+        let stripped: String = m28
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await.unwrap();
+            }
+        }
+    }
 }
 
 /// `SELECT COUNT(*) > 0 FROM provider_models WHERE typeof(max_output_tokens)='text'

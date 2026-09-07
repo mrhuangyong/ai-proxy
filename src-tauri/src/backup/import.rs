@@ -49,6 +49,7 @@ pub async fn import_bundle(
     let mut tx = pool.begin().await?;
     for (table, rows) in [
         ("providers", &data.providers),
+        ("provider_protocols", &data.provider_protocols),
         ("provider_models", &data.provider_models),
         ("api_keys", &data.api_keys),
         ("interceptor_rules", &data.interceptor_rules),
@@ -80,6 +81,7 @@ pub async fn import_bundle(
 async fn integer_columns(pool: &SqlitePool) -> BackupResult<HashMap<&'static str, Vec<String>>> {
     let tables = [
         "providers",
+        "provider_protocols",
         "provider_models",
         "api_keys",
         "interceptor_rules",

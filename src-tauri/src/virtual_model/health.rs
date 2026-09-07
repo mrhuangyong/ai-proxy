@@ -111,7 +111,7 @@ async fn probe(provider_id: &str, model_name: &str, max_tokens: u32) -> Result<(
     });
 
     let client = crate::http::SHARED_HTTP_CLIENT.clone();
-    let url = format!("{}/{}", base_url.trim_end_matches('/'), probe_path(&format));
+    let url = crate::provider::manager::join_base_url_and_path(&base_url, probe_path(&format));
     let mut req = client
         .post(&url)
         .json(&body)

@@ -20,8 +20,14 @@
           <div class="provider-card-header">
             <div class="provider-card-title">
               <span class="provider-card-name">{{ p.name }}</span>
-              <n-tag size="small" :type="formatColorMap[p.format] || 'default'" round>
-                {{ p.format }}
+              <n-tag
+                v-for="f in providerFormats(p)"
+                :key="f"
+                size="small"
+                :type="formatColorMap[f] || 'default'"
+                round
+              >
+                {{ f }}
               </n-tag>
             </div>
             <n-switch :value="p.enabled" size="small" @update:value="(v: boolean) => handleToggle(p.id, v)" />
@@ -74,7 +80,7 @@
       negative-text="取消"
       :loading="modalLoading"
       @positive-click="handleSubmit"
-      style="width: 600px"
+      style="width: 680px"
     >
       <n-form :model="form" label-placement="left" label-width="80">
         <n-form-item label="名称" required>
@@ -86,21 +92,58 @@
           </template>
         </n-form-item>
         <n-form-item label="Base URL" required>
-          <n-input v-model:value="form.base_url" placeholder="例如: https://api.openai.com" :input-props="{ autocapitalize: 'off' }" />
+          <n-input v-model:value="form.base_url" placeholder="例如: https://api.openai.com（末尾含 /v1 也可以，自动去重）" :input-props="{ autocapitalize: 'off' }" />
         </n-form-item>
-        <n-form-item label="格式">
-          <n-select
-            v-model:value="form.format"
-            :options="formatOptions"
-            placeholder="选择格式"
-          />
-        </n-form-item>
-        <n-form-item label="Endpoint">
-          <n-input
-            v-model:value="form.endpoint_path"
-            placeholder="留空使用默认路径，例如: /chat/completions"
-            :input-props="{ autocapitalize: 'off' }"
-          />
+        <n-form-item label="上游协议" required>
+          <div class="protocol-list">
+            <div v-for="(proto, index) in form.protocols" :key="index" class="protocol-row">
+              <div class="protocol-row-main">
+                <n-radio
+                  :checked="proto.is_primary"
+                  @update:checked="() => setPrimaryProtocol(index)"
+                >
+                  默认
+                </n-radio>
+                <n-select
+                  v-model:value="proto.format"
+                  :options="formatOptions"
+                  style="width: 170px"
+                />
+                <n-input
+                  v-model:value="proto.base_url"
+                  placeholder="Base URL 覆盖，留空用默认"
+                  :input-props="{ autocapitalize: 'off' }"
+                  style="flex: 1"
+                />
+                <n-button
+                  quaternary
+                  type="error"
+                  size="small"
+                  :disabled="form.protocols.length <= 1"
+                  @click="removeProtocol(index)"
+                >
+                  删除
+                </n-button>
+              </div>
+              <n-input
+                v-model:value="proto.endpoint_path"
+                size="small"
+                :placeholder="`Endpoint，留空使用默认路径（${defaultEndpointHint(proto.format)}）`"
+                :input-props="{ autocapitalize: 'off' }"
+              />
+            </div>
+            <n-button
+              dashed
+              size="small"
+              :disabled="form.protocols.length >= formatOptions.length"
+              @click="addProtocol"
+            >
+              + 添加协议
+            </n-button>
+            <n-text depth="3" style="font-size: 12px">
+              下游请求协议与某条协议匹配时直接透传（不转换）；默认协议用于不匹配时的格式转换。
+            </n-text>
+          </div>
         </n-form-item>
         <n-form-item label="上游 User-Agent">
           <n-input-group>
@@ -402,13 +445,19 @@ const CAP_TOGGLES: Array<{ key: keyof ModelCapabilities; label: string }> = [
   { key: 'extra_passthrough', label: '透传未知参数 (extra)' },
 ]
 
+interface ProtocolFormItem {
+  format: string
+  base_url: string
+  endpoint_path: string
+  is_primary: boolean
+}
+
 const form = ref({
   name: '',
   base_url: '',
-  format: 'completions' as string,
-  endpoint_path: '',
   upstream_user_agent: '',
   api_key: '',
+  protocols: [] as ProtocolFormItem[],
   models: [] as Array<{
     id?: string
     model_name: string
@@ -422,13 +471,61 @@ const formatOptions = [
   { label: 'OpenAI Completions', value: 'completions' },
   { label: 'OpenAI Responses', value: 'responses' },
   { label: 'Anthropic', value: 'anthropic' },
+  { label: 'Gemini', value: 'gemini' },
 ]
+
+const DEFAULT_ENDPOINT_BY_FORMAT: Record<string, string> = {
+  completions: '/v1/chat/completions',
+  responses: '/v1/responses',
+  anthropic: '/v1/messages',
+  gemini: '/v1beta/models/{model}:generateContent',
+}
+
+function defaultEndpointHint(format: string): string {
+  return DEFAULT_ENDPOINT_BY_FORMAT[format] || ''
+}
 
 const formatColorMap: Record<string, string> = {
   completions: 'success',
   responses: 'info',
   anthropic: 'warning',
   gemini: 'purple',
+}
+
+/** Formats shown on a provider card — all configured protocols, falling back
+ * to the legacy single-format field for pre-028 data. */
+function providerFormats(p: Provider): string[] {
+  if (p.protocols?.length) return p.protocols.map((x) => x.format)
+  return [p.format]
+}
+
+/** Pick the first format not yet configured, for the "+ 添加协议" default. */
+function nextUnusedFormat(): string {
+  const used = new Set(form.value.protocols.map((p) => p.format))
+  return formatOptions.find((o) => !used.has(o.value))?.value || 'completions'
+}
+
+function addProtocol() {
+  form.value.protocols = [
+    ...form.value.protocols,
+    { format: nextUnusedFormat(), base_url: '', endpoint_path: '', is_primary: false },
+  ]
+}
+
+function removeProtocol(index: number) {
+  if (form.value.protocols.length <= 1) return
+  const wasPrimary = form.value.protocols[index].is_primary
+  form.value.protocols = form.value.protocols.filter((_, i) => i !== index)
+  if (wasPrimary && form.value.protocols.length > 0) {
+    form.value.protocols[0].is_primary = true
+  }
+}
+
+function setPrimaryProtocol(index: number) {
+  form.value.protocols = form.value.protocols.map((p, i) => ({
+    ...p,
+    is_primary: i === index,
+  }))
 }
 
 function addModel() {
@@ -448,10 +545,9 @@ function openCreateModal() {
   form.value = {
     name: '',
     base_url: '',
-    format: 'completions',
-    endpoint_path: '',
     upstream_user_agent: '',
     api_key: '',
+    protocols: [{ format: 'completions', base_url: '', endpoint_path: '', is_primary: true }],
     models: [],
   }
   showModal.value = true
@@ -460,13 +556,28 @@ function openCreateModal() {
 function openEditModal(row: Provider) {
   isEditing.value = true
   editingId.value = row.id
+  const protocols: ProtocolFormItem[] = row.protocols?.length
+    ? row.protocols.map((p) => ({
+        format: p.format,
+        base_url: p.base_url || '',
+        endpoint_path: p.endpoint_path || '',
+        is_primary: !!p.is_primary,
+      }))
+    : [
+        {
+          format: row.format,
+          base_url: '',
+          endpoint_path: row.endpoint_path || '',
+          is_primary: true,
+        },
+      ]
+  if (!protocols.some((p) => p.is_primary)) protocols[0].is_primary = true
   form.value = {
     name: row.name,
     base_url: row.base_url,
-    format: row.format,
-    endpoint_path: row.endpoint_path || '',
     upstream_user_agent: row.upstream_user_agent || '',
     api_key: '',
+    protocols,
     models: row.models.map((m) => ({
       id: m.id,
       model_name: m.model_name,
@@ -541,39 +652,57 @@ async function handleTestModel(modelName: string) {
   }
 }
 
-/** Fetch the upstream model list with the dialog's current form values.
- * Edit mode with a blank key field falls back to the stored key server-side. */
+/** Fetch the upstream model list for EVERY configured protocol (each with its
+ * own effective base URL / endpoint) and merge the results, deduped by model
+ * id. Edit mode with a blank key field falls back to the stored key
+ * server-side. */
 async function handleProbeModels() {
   if (!form.value.base_url.trim()) {
     message.error('请先填写 Base URL')
     return
   }
   probing.value = true
+  const merged = new Map<string, ProbeModelItem>()
+  const failures: string[] = []
   try {
-    const result = await api<ProbeModelsResult>('/api/providers/probe-models', {
-      method: 'POST',
-      body: JSON.stringify({
-        provider_id: isEditing.value ? editingId.value : null,
-        base_url: form.value.base_url.trim(),
-        format: form.value.format,
-        endpoint_path: form.value.endpoint_path?.trim() || null,
-        api_key: form.value.api_key?.trim() || null,
-        upstream_user_agent: form.value.upstream_user_agent?.trim() || null,
-      }),
-    })
-    if (!result.success) {
-      message.error(result.error ? `${result.message}：${result.error}` : result.message)
+    for (const proto of form.value.protocols) {
+      try {
+        const result = await api<ProbeModelsResult>('/api/providers/probe-models', {
+          method: 'POST',
+          body: JSON.stringify({
+            provider_id: isEditing.value ? editingId.value : null,
+            base_url: proto.base_url.trim() || form.value.base_url.trim(),
+            format: proto.format,
+            endpoint_path: proto.endpoint_path?.trim() || null,
+            api_key: form.value.api_key?.trim() || null,
+            upstream_user_agent: form.value.upstream_user_agent?.trim() || null,
+          }),
+        })
+        if (!result.success) {
+          failures.push(proto.format)
+          continue
+        }
+        for (const m of result.models) {
+          if (!merged.has(m.id)) merged.set(m.id, m)
+        }
+      } catch {
+        failures.push(proto.format)
+      }
+    }
+    if (failures.length && merged.size === 0) {
+      message.error(`所有协议探测均失败（${failures.join('、')}），请检查 Base URL / API Key`)
       return
     }
-    probeResults.value = result.models
+    if (failures.length) {
+      message.warning(`部分协议探测失败：${failures.join('、')}`)
+    }
+    probeResults.value = Array.from(merged.values())
     probeSelected.value = []
-    if (result.models.length === 0) {
+    if (probeResults.value.length === 0) {
       message.info('探测到的模型均已存在')
       return
     }
     showProbeModal.value = true
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : '探测失败')
   } finally {
     probing.value = false
   }
@@ -614,6 +743,25 @@ async function handleSubmit() {
     message.warning('请输入 API Key')
     return false
   }
+  if (!form.value.protocols.length) {
+    message.warning('至少配置一条上游协议')
+    return false
+  }
+  const protoFormats = form.value.protocols.map((p) => p.format)
+  if (new Set(protoFormats).size !== protoFormats.length) {
+    message.error('上游协议不能重复配置同一格式')
+    return false
+  }
+
+  // The primary protocol also mirrors onto the legacy flat format /
+  // endpoint_path fields (kept for older API consumers).
+  const primary = form.value.protocols.find((p) => p.is_primary) || form.value.protocols[0]
+  const protocolsPayload = form.value.protocols.map((p) => ({
+    format: p.format,
+    base_url: p.base_url.trim() || null,
+    endpoint_path: p.endpoint_path.trim() || null,
+    is_primary: p === primary,
+  }))
 
   modalLoading.value = true
   try {
@@ -621,9 +769,10 @@ async function handleSubmit() {
       const body: Record<string, unknown> = {
         name: form.value.name,
         base_url: form.value.base_url,
-        format: form.value.format,
-        endpoint_path: form.value.endpoint_path || null,
+        format: primary.format,
+        endpoint_path: primary.endpoint_path.trim() || null,
         upstream_user_agent: form.value.upstream_user_agent || '',
+        protocols: protocolsPayload,
         models: form.value.models.map((m) => ({
           id: m.id,
           model_name: m.model_name,
@@ -646,10 +795,11 @@ async function handleSubmit() {
         body: JSON.stringify({
           name: form.value.name,
           base_url: form.value.base_url,
-          format: form.value.format,
-          endpoint_path: form.value.endpoint_path || null,
+          format: primary.format,
+          endpoint_path: primary.endpoint_path.trim() || null,
           upstream_user_agent: form.value.upstream_user_agent || '',
           api_key: form.value.api_key,
+          protocols: protocolsPayload,
           models: form.value.models.map((m) => ({
             model_name: m.model_name,
             target_model: null,
@@ -806,5 +956,27 @@ onMounted(fetchProviders)
   padding-top: 4px;
   border-top: 1px solid var(--border);
   margin-top: auto;
+}
+
+.protocol-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.protocol-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.protocol-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 </style>

@@ -74,6 +74,17 @@
             style="width: 100%"
           />
         </n-form-item>
+        <n-form-item>
+          <template #label>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <span>协议匹配直接透传</span>
+              </template>
+              开启后，若下游请求协议与上游供应商配置的协议一致，请求/响应将原样转发，不经过参数转换（能力裁剪等 IR 级处理不生效）；命中"注入系统提示/参数覆盖"类拦截规则的请求仍走转换链路。关闭则全部走转换。
+            </n-tooltip>
+          </template>
+          <n-switch v-model:value="settings.passthroughEnabled" />
+        </n-form-item>
         <n-form-item label="自动重试次数">
           <n-input-number
             v-model:value="settings.upstreamMaxRetries"
@@ -387,6 +398,7 @@ interface AppSettings {
   upstreamInvisibleRetryBufferLimitMb: number
   extractSystemFromMessages: boolean
   upstreamUserAgent: string
+  passthroughEnabled: boolean
 }
 
 const settings = ref<AppSettings>({
@@ -404,6 +416,7 @@ const settings = ref<AppSettings>({
   upstreamInvisibleRetryBufferLimitMb: 32,
   extractSystemFromMessages: true,
   upstreamUserAgent: '',
+  passthroughEnabled: true,
 })
 
 const savedNetworkConfig = ref({
@@ -437,6 +450,7 @@ async function loadSettings() {
       upstream_invisible_retry_buffer_limit_mb: string
       extract_system_from_messages: string
       upstream_user_agent: string
+      passthrough_enabled: string
     }>('/api/settings')
     settings.value = {
       port: parseInt(data.http_port) || 7860,
@@ -453,6 +467,7 @@ async function loadSettings() {
       upstreamInvisibleRetryBufferLimitMb: parseInt(data.upstream_invisible_retry_buffer_limit_mb) || 32,
       extractSystemFromMessages: data.extract_system_from_messages !== 'false',
       upstreamUserAgent: data.upstream_user_agent || '',
+      passthroughEnabled: data.passthrough_enabled !== 'false',
     }
     savedNetworkConfig.value = {
       port: settings.value.port,
@@ -488,6 +503,7 @@ async function handleSave() {
         upstream_invisible_retry_buffer_limit_mb: String(settings.value.upstreamInvisibleRetryBufferLimitMb),
         extract_system_from_messages: String(settings.value.extractSystemFromMessages),
         upstream_user_agent: settings.value.upstreamUserAgent,
+        passthrough_enabled: String(settings.value.passthroughEnabled),
       }),
     })
 
