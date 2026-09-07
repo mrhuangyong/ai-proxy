@@ -13,24 +13,44 @@
 //!     → response.output_item.done
 //!     → response.completed
 //!
-//! Each event must carry a strictly-increasing `sequence_number`. Omitting the
-//! lifecycle envelope (created/added/done) previously caused codex to discard
-//! the incremental deltas and reset to the final `response.completed` text,
-//! which surfaced as "text appears, vanishes, then re-appears from the start"
-//! in the UI.
+//! Each event must carry a strictly-increasing `sequence_number`, and each SSE
+//! frame must include an `event:` line matching the JSON `type` (OpenResponses
+//! / OpenAI wire shape). Omitting the lifecycle envelope previously caused
+//! clients that route on `event:` to drop deltas.
 
 use ai_proxy_lib::converter::ir::{IrStreamChunk, IrToolCallDelta};
 use ai_proxy_lib::server::handlers::ResponsesStreamStateMachine;
 use serde_json::Value;
 
-/// Parse one `data: {...}\n\n` SSE frame into its JSON payload.
+/// Parse one SSE frame (`event: …\ndata: {…}\n\n` or data-only) into JSON.
+/// Asserts that when `event:` is present it equals the JSON `type`.
 fn parse_frame(sse: &str) -> Value {
-    let trimmed = sse
-        .strip_prefix("data: ")
-        .unwrap_or(sse)
-        .trim()
-        .trim_end_matches('\n');
-    serde_json::from_str(trimmed).expect("SSE frame must be valid JSON")
+    let mut event_name: Option<&str> = None;
+    let mut data_body: Option<&str> = None;
+    for line in sse.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_name = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_body = Some(rest.trim());
+        }
+    }
+    let data = data_body.unwrap_or_else(|| {
+        sse.strip_prefix("data: ")
+            .unwrap_or(sse)
+            .trim()
+            .trim_end_matches('\n')
+    });
+    let value: Value = serde_json::from_str(data).expect("SSE frame must be valid JSON");
+    let ty = value["type"].as_str().unwrap_or("");
+    assert!(!ty.is_empty(), "frame JSON must carry type, got: {sse:?}");
+    let event = event_name.unwrap_or_else(|| {
+        panic!("SSE frame missing event: line (expected event: {ty}), got: {sse:?}")
+    });
+    assert_eq!(
+        event, ty,
+        "SSE event: name must equal JSON type, got event={event:?} type={ty:?}"
+    );
+    value
 }
 
 /// Drive the state machine with a sequence of chunks and collect every emitted
