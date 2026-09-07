@@ -415,6 +415,7 @@ impl FormatParser for AnthropicParser {
                             content_parts.push(IrContentPart::Thinking {
                                 text: text.to_string(),
                                 signature,
+                                encrypted_content: None,
                             });
                         }
                     }
@@ -595,6 +596,7 @@ fn parse_anthropic_message(msg: &Value) -> Result<Vec<IrMessage>, ProxyError> {
                                 content_parts.push(IrContentPart::Thinking {
                                     text: text.to_string(),
                                     signature,
+                                    encrypted_content: None,
                                 });
                             }
                         }

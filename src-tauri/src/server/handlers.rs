@@ -2829,9 +2829,10 @@ impl ResponsesStreamStateMachine {
         }
     }
 
-    /// Close an open reasoning item: emit `reasoning_summary_part.done` then
-    /// `output_item.done` for the reasoning item. Returns empty vec if no
-    /// reasoning item was open. Caller advances output_index after these events.
+    /// Close an open reasoning item: emit `reasoning_summary_text.done`,
+    /// `reasoning_summary_part.done`, then `output_item.done` for the reasoning
+    /// item. Returns empty vec if no reasoning item was open. Caller advances
+    /// output_index after these events.
     fn close_thinking(&mut self) -> Vec<String> {
         if !self.thinking_started {
             return Vec::new();
@@ -2842,6 +2843,15 @@ impl ResponsesStreamStateMachine {
         // close_thinking, same convention as the original design).
         let idx = self.output_index;
         let mut out = Vec::new();
+        // Codex / OpenAI Responses expect summary_text.done before part.done.
+        out.push(self.ev(serde_json::json!({
+            "type": "response.reasoning_summary_text.done",
+            "output_index": idx,
+            "content_index": 0,
+            "item_id": self.reasoning_id,
+            "text": self.accumulated_reasoning.clone(),
+            "response_id": self.response_id,
+        })));
         out.push(self.ev(serde_json::json!({
             "type": "response.reasoning_summary_part.done",
             "output_index": idx,
@@ -3021,7 +3031,16 @@ impl ResponsesStreamStateMachine {
                     "response_id": self.response_id,
                 })));
             }
-            return out;
+            // Do not early-return when the same IR chunk also carries text —
+            // Anthropic→IR can pack thinking + content together.
+            let has_content = chunk
+                .delta_content
+                .as_ref()
+                .map(|c| !c.is_empty())
+                .unwrap_or(false);
+            if !has_content {
+                return out;
+            }
         }
 
         // --- Text content ---
@@ -3442,6 +3461,7 @@ fn inject_cached_reasoning_into_assistant_messages(
             IrContentPart::Thinking {
                 text: reasoning.clone(),
                 signature: None,
+                encrypted_content: None,
             },
         );
         return;
@@ -3464,6 +3484,7 @@ fn inject_cached_reasoning_into_assistant_messages(
         msg.content.push(IrContentPart::Thinking {
             text: thinking,
             signature: None,
+            encrypted_content: None,
         });
         let trimmed = remaining.trim();
         if !trimmed.is_empty() {

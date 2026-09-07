@@ -300,9 +300,16 @@ fn matches_first_for_format(format: &ClientFormat, v: &serde_json::Value) -> boo
             }),
         ClientFormat::Responses => {
             let t = v["type"].as_str().unwrap_or("");
+            // Reasoning deltas are real streamed output (same as Completions
+            // reasoning_content / Anthropic thinking_delta). Excluding them
+            // kept PreFirstToken buffering until output_text/tool args, so
+            // high-effort glm streams appeared non-streaming for seconds.
             matches!(
                 t,
-                "response.output_text.delta" | "response.function_call_arguments.delta"
+                "response.output_text.delta"
+                    | "response.function_call_arguments.delta"
+                    | "response.reasoning_summary_text.delta"
+                    | "response.reasoning_text.delta"
             ) && (v.get("delta").is_some() || v.get("arguments").is_some())
         }
     }
@@ -558,6 +565,13 @@ data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}"#
 
         let line = r#"data: {"type":"response.created"}"#;
         assert!(!is_first_business_chunk(&ClientFormat::Responses, line));
+
+        // Dialect / summary reasoning deltas must unblock PreFirstToken so
+        // high-effort streams are not buffered until output_text/tool args.
+        let line = r#"data: {"type":"response.reasoning_text.delta","delta":"想"}"#;
+        assert!(is_first_business_chunk(&ClientFormat::Responses, line));
+        let line = r#"data: {"type":"response.reasoning_summary_text.delta","delta":"想"}"#;
+        assert!(is_first_business_chunk(&ClientFormat::Responses, line));
     }
 
     #[test]

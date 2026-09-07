@@ -411,7 +411,9 @@ impl FormatGenerator for AnthropicGenerator {
                     }
                     content.push(block);
                 }
-                IrContentPart::Thinking { text, signature } => {
+                IrContentPart::Thinking {
+                    text, signature, ..
+                } => {
                     let mut block = json!({
                         "type": "thinking",
                         "thinking": text,

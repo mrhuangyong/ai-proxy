@@ -868,3 +868,200 @@ fn completions_parser_effort_none_disables_thinking() {
     let ir = CompletionsParser.parse_request(&body).unwrap();
     assert_eq!(ir.thinking.as_ref().unwrap().mode, ThinkingMode::Disabled);
 }
+
+// ---------------------------------------------------------------------------
+// Codex reasoning compatibility: non-stream Responses parse/generate, request
+// replay, and Anthropic thinking → Responses summary_text.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn responses_parser_keeps_reasoning_output_items() {
+    let body = json!({
+        "id": "resp_abc",
+        "model": "gpt-5",
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "逐步分析"}],
+                "encrypted_content": "gAAAAABp-enc"
+            },
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "答案"}]
+            }
+        ],
+        "usage": {"input_tokens": 1, "output_tokens": 2}
+    });
+    let ir = ResponsesParser.parse_response(&body).unwrap();
+    let thinking: Vec<_> = ir
+        .message
+        .content
+        .iter()
+        .filter_map(|p| match p {
+            IrContentPart::Thinking {
+                text,
+                encrypted_content,
+                ..
+            } => Some((text.as_str(), encrypted_content.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking, vec![("逐步分析", Some("gAAAAABp-enc"))]);
+    assert!(ir
+        .message
+        .content
+        .iter()
+        .any(|p| matches!(p, IrContentPart::Text { text, .. } if text == "答案")));
+}
+
+#[test]
+fn responses_parser_reasoning_dialect_content_maps_to_thinking() {
+    let body = json!({
+        "id": "resp_x",
+        "output": [{
+            "type": "reasoning",
+            "id": "rs_1",
+            "content": [{"type": "reasoning_text", "text": "方言思考"}],
+            "summary": []
+        }],
+        "usage": {"input_tokens": 0, "output_tokens": 1}
+    });
+    let ir = ResponsesParser.parse_response(&body).unwrap();
+    assert!(ir
+        .message
+        .content
+        .iter()
+        .any(|p| matches!(p, IrContentPart::Thinking { text, .. } if text == "方言思考")));
+}
+
+#[test]
+fn responses_parser_stream_reasoning_text_delta_maps_to_thinking() {
+    let line = r#"data: {"type":"response.reasoning_text.delta","delta":"think"}"#;
+    let chunk = ResponsesParser
+        .parse_stream_chunk(line)
+        .unwrap()
+        .expect("chunk");
+    assert_eq!(chunk.delta_thinking.as_deref(), Some("think"));
+}
+
+#[test]
+fn responses_request_replay_keeps_reasoning_item_shape() {
+    let body = json!({
+        "model": "gpt-5",
+        "input": [
+            {
+                "type": "reasoning",
+                "id": "rs_prev",
+                "summary": [],
+                "encrypted_content": "gAAAAABp-replay"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "ok"
+            },
+            {"role": "user", "content": "继续"}
+        ]
+    });
+    let ir = ResponsesParser.parse_request(&body).unwrap();
+    let out = ResponsesGenerator.generate_request(&ir).unwrap();
+    let items = out["input"].as_array().unwrap();
+    let reasoning = items
+        .iter()
+        .find(|i| i["type"] == "reasoning")
+        .expect("reasoning item must be replayed as type=reasoning, not input_text");
+    assert_eq!(reasoning["encrypted_content"], "gAAAAABp-replay");
+    // Empty summary is fine for encrypted-only replay.
+    assert!(reasoning.get("summary").is_some());
+}
+
+#[test]
+fn responses_generate_response_uses_unique_ids_and_status() {
+    let ir = IrResponse {
+        id: Some("msg_upstream".into()),
+        model: Some("claude".into()),
+        message: IrMessage {
+            role: IrRole::Assistant,
+            content: vec![
+                IrContentPart::Thinking {
+                    text: "思考中".into(),
+                    signature: None,
+                    encrypted_content: None,
+                },
+                IrContentPart::Text {
+                    text: "结果".into(),
+                    citations: None,
+                },
+            ],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        },
+        finish_reason: Some("completed".into()),
+        stop_sequence: None,
+        usage: IrUsage {
+            prompt_tokens: 1,
+            completion_tokens: 2,
+            total_tokens: 3,
+            cached_tokens: 0,
+            cache_creation_input_tokens: 0,
+            thinking_tokens: 0,
+            raw: None,
+        },
+    };
+    let out = ResponsesGenerator.generate_response(&ir).unwrap();
+    assert_eq!(out["id"], "resp_msg_upstream");
+    let reasoning = out["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["type"] == "reasoning")
+        .unwrap();
+    assert_eq!(reasoning["id"], "rs_resp_msg_upstream");
+    assert_eq!(reasoning["status"], "completed");
+    assert_eq!(reasoning["summary"][0]["text"], "思考中");
+    let message = out["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["type"] == "message")
+        .unwrap();
+    assert_eq!(message["id"], "msg_resp_msg_upstream");
+    assert_eq!(message["status"], "completed");
+}
+
+#[test]
+fn anthropic_thinking_roundtrips_to_responses_summary() {
+    use ai_proxy_lib::converter::parsers::anthropic::AnthropicParser;
+    let body = json!({
+        "id": "msg_a",
+        "model": "claude-sonnet-4",
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "先想一步", "signature": "sig"},
+            {"type": "text", "text": "答案"}
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 2}
+    });
+    let ir = AnthropicParser.parse_response(&body).unwrap();
+    let out = ResponsesGenerator.generate_response(&ir).unwrap();
+    let reasoning = out["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["type"] == "reasoning")
+        .expect("Anthropic thinking must become Responses reasoning");
+    assert_eq!(reasoning["summary"][0]["type"], "summary_text");
+    assert_eq!(reasoning["summary"][0]["text"], "先想一步");
+}

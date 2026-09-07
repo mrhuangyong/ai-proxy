@@ -203,7 +203,7 @@ impl FormatParser for ResponsesParser {
                     error: None,
                 }))
             }
-            "response.reasoning_summary_text.delta" => {
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 let delta = event["delta"].as_str().unwrap_or("");
                 Ok(Some(IrStreamChunk {
                     id: event["response_id"].as_str().map(String::from),
@@ -395,6 +395,49 @@ impl FormatParser for ResponsesParser {
                             name: name.to_string(),
                             arguments: arguments.to_string(),
                         });
+                    }
+                    "reasoning" => {
+                        let mut text = output
+                            .get("summary")
+                            .and_then(|s| s.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            })
+                            .unwrap_or_default();
+                        if text.is_empty() {
+                            text = output
+                                .get("content")
+                                .and_then(|c| c.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|p| {
+                                            let ty = p.get("type").and_then(|t| t.as_str())?;
+                                            if ty == "reasoning_text" || ty == "summary_text" {
+                                                p.get("text").and_then(|t| t.as_str())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("")
+                                })
+                                .unwrap_or_default();
+                        }
+                        let encrypted_content = output
+                            .get("encrypted_content")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(String::from);
+                        if !text.is_empty() || encrypted_content.is_some() {
+                            content_parts.push(IrContentPart::Thinking {
+                                text,
+                                signature: None,
+                                encrypted_content,
+                            });
+                        }
                     }
                     "compaction" => {
                         let id = output["id"].as_str().unwrap_or("").to_string();
@@ -601,6 +644,7 @@ fn parse_input_item(item: &Value) -> Result<Option<IrMessage>, ProxyError> {
                     content_parts.push(IrContentPart::Thinking {
                         text: thinking,
                         signature: None,
+                        encrypted_content: None,
                     });
                 }
                 let trimmed = clean.trim();
@@ -621,7 +665,8 @@ fn parse_input_item(item: &Value) -> Result<Option<IrMessage>, ProxyError> {
             }))
         }
         "reasoning" => {
-            let text = item
+            // Prefer standard summary[]; fall back to dialect content/reasoning_text.
+            let mut text = item
                 .get("summary")
                 .and_then(|s| s.as_array())
                 .map(|arr| {
@@ -631,17 +676,49 @@ fn parse_input_item(item: &Value) -> Result<Option<IrMessage>, ProxyError> {
                         .join("")
                 })
                 .unwrap_or_default();
+            if text.is_empty() {
+                text = item
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|p| {
+                                let ty = p.get("type").and_then(|t| t.as_str())?;
+                                if ty == "reasoning_text" || ty == "summary_text" {
+                                    p.get("text").and_then(|t| t.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .unwrap_or_default();
+            }
+            let encrypted_content = item
+                .get("encrypted_content")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+
+            // Encrypted-only items (empty summary) must still round-trip for Codex.
+            if text.is_empty() && encrypted_content.is_none() {
+                return Ok(Some(IrMessage {
+                    role: IrRole::Assistant,
+                    content: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                }));
+            }
 
             Ok(Some(IrMessage {
                 role: IrRole::Assistant,
-                content: if text.is_empty() {
-                    vec![]
-                } else {
-                    vec![IrContentPart::Thinking {
-                        text,
-                        signature: None,
-                    }]
-                },
+                content: vec![IrContentPart::Thinking {
+                    text,
+                    signature: None,
+                    encrypted_content,
+                }],
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
