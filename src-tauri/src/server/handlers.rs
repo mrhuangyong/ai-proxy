@@ -2805,12 +2805,15 @@ impl ResponsesStreamStateMachine {
         &self.accumulated_reasoning
     }
 
-    /// Build an SSE `data: {...}\n\n` line, stamping a strictly-increasing
-    /// `sequence_number` onto the event.
+    /// Build an SSE frame with both `event:` (from JSON `type`) and `data:`,
+    /// stamping a strictly-increasing `sequence_number` onto the payload.
     fn ev(&mut self, mut v: serde_json::Value) -> String {
         v["sequence_number"] = serde_json::json!(self.seq);
         self.seq += 1;
-        format!("data: {}\n\n", v)
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some(ty) if !ty.is_empty() => format!("event: {ty}\ndata: {v}\n\n"),
+            _ => format!("data: {v}\n\n"),
+        }
     }
 
     fn ensure_created(&mut self, out: &mut Vec<String>) {

@@ -5,6 +5,14 @@ use serde_json::{json, Value};
 
 pub struct ResponsesGenerator;
 
+/// SSE frame for Responses streaming: `event: {type}` + `data: {json}`.
+fn responses_sse_frame(value: &Value) -> String {
+    match value.get("type").and_then(|t| t.as_str()) {
+        Some(ty) if !ty.is_empty() => format!("event: {ty}\ndata: {value}\n\n"),
+        _ => format!("data: {value}\n\n"),
+    }
+}
+
 impl FormatGenerator for ResponsesGenerator {
     fn generate_request(&self, ir: &IrRequest) -> Result<Value, ProxyError> {
         let mut instructions: Option<String> = None;
@@ -245,7 +253,7 @@ impl FormatGenerator for ResponsesGenerator {
                             "arguments": "",
                         }
                     });
-                    return format!("data: {}\n\n", event);
+                    return responses_sse_frame(&event);
                 }
                 if let Some(args) = &tc.arguments {
                     let event = json!({
@@ -255,7 +263,7 @@ impl FormatGenerator for ResponsesGenerator {
                         "call_id": tc.id,
                         "delta": args,
                     });
-                    return format!("data: {}\n\n", event);
+                    return responses_sse_frame(&event);
                 }
             }
         }
@@ -291,8 +299,10 @@ impl FormatGenerator for ResponsesGenerator {
                 }
             });
             return format!(
-                "data: {}\n\ndata: {}\n\ndata: {}\n\n",
-                text_done, item_done, completed
+                "{}{}{}",
+                responses_sse_frame(&text_done),
+                responses_sse_frame(&item_done),
+                responses_sse_frame(&completed)
             );
         }
 
@@ -304,7 +314,7 @@ impl FormatGenerator for ResponsesGenerator {
                 "delta": thinking,
                 "response_id": response_id,
             });
-            return format!("data: {}\n\n", delta_event);
+            return responses_sse_frame(&delta_event);
         }
 
         if let Some(content) = &chunk.delta_content {
@@ -313,7 +323,7 @@ impl FormatGenerator for ResponsesGenerator {
                 "delta": content,
                 "response_id": response_id,
             });
-            return format!("data: {}\n\n", delta_event);
+            return responses_sse_frame(&delta_event);
         }
 
         String::new()
@@ -358,8 +368,10 @@ impl FormatGenerator for ResponsesGenerator {
             }
         });
         Some(format!(
-            "data: {}\n\ndata: {}\n\ndata: {}\n\n",
-            created, item_added, content_added
+            "{}{}{}",
+            responses_sse_frame(&created),
+            responses_sse_frame(&item_added),
+            responses_sse_frame(&content_added)
         ))
     }
 
