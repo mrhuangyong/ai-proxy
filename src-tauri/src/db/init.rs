@@ -456,6 +456,31 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         }
     }
 
+    // Migration 030: per-model vision (image input) capability for Codex
+    // input_modalities + IR image stripping. Default 1 keeps existing behaviour.
+    let has_supports_vision: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('provider_models') WHERE name = 'supports_vision'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_supports_vision {
+        let migration30 = include_str!("../../migrations/030_model_supports_vision.sql");
+        let stripped: String = migration30
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await?;
+            }
+        }
+        info!("Applied migration 030: model supports_vision");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

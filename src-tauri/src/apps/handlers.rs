@@ -369,26 +369,35 @@ pub async fn launch_app(
         let models = body.models.as_deref().unwrap_or(&[]);
         config::write_opencode_config(models, &proxy_url, &api_key).await
     } else {
-        // codex visible-model catalog: context_window lookup for the selected
-        // slugs (one query over enabled provider models; unknown names — e.g.
-        // virtual models — fall back to 272000 inside the catalog builder).
-        let context_windows: HashMap<String, u64> = if app_type.is_codex() {
-            sqlx::query_as::<_, (String, i64)>(
-                "SELECT pm.model_name, COALESCE(MAX(pm.context_window), 272000)
-                 FROM provider_models pm
-                 JOIN providers p ON p.id = pm.provider_id
-                 WHERE pm.enabled = 1 AND p.enabled = 1
-                 GROUP BY pm.model_name COLLATE NOCASE",
-            )
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(name, ctx)| (name, ctx as u64))
-            .collect()
-        } else {
-            HashMap::new()
-        };
+        // codex visible-model catalog: context_window + vision lookup for the
+        // selected slugs (one query over enabled provider models; unknown names
+        // — e.g. virtual models — fall back inside the catalog builder).
+        // Same-name models across providers: MAX(context_window) and MAX(vision)
+        // so any vision-capable row keeps advertising image input.
+        let (context_windows, supports_vision): (HashMap<String, u64>, HashMap<String, bool>) =
+            if app_type.is_codex() {
+                let rows = sqlx::query_as::<_, (String, i64, i64)>(
+                    "SELECT pm.model_name,
+                            COALESCE(MAX(pm.context_window), 272000),
+                            COALESCE(MAX(pm.supports_vision), 1)
+                     FROM provider_models pm
+                     JOIN providers p ON p.id = pm.provider_id
+                     WHERE pm.enabled = 1 AND p.enabled = 1
+                     GROUP BY pm.model_name COLLATE NOCASE",
+                )
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+                let mut ctx = HashMap::new();
+                let mut vision = HashMap::new();
+                for (name, context_window, supports_vision_flag) in rows {
+                    ctx.insert(name.clone(), context_window as u64);
+                    vision.insert(name, supports_vision_flag != 0);
+                }
+                (ctx, vision)
+            } else {
+                (HashMap::new(), HashMap::new())
+            };
         config::write_config(
             &app_type,
             &body.model,
@@ -401,6 +410,7 @@ pub async fn launch_app(
             context_window,
             body.visible_models.as_deref(),
             &context_windows,
+            &supports_vision,
         )
         .await
     };

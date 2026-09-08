@@ -9,6 +9,34 @@ use axum::routing::{get, post};
 use axum::Router;
 
 pub fn create_router() -> Router {
+    // Model discovery is public (no Authorization). Codex and other clients
+    // probe these before chat; keep them outside proxy auth so listing works
+    // even when proxy_auth_enabled is on. GenerateContent POSTs stay protected.
+    let public_model_routes = Router::new()
+        .route("/v1/models", get(handlers::handle_list_models))
+        .route("/v1/models/:model", get(handlers::handle_get_model))
+        .route("/v1beta/models", get(handlers::handle_gemini_list_models))
+        .route(
+            "/v1beta/models/:model",
+            get(handlers::handle_gemini_get_model),
+        )
+        .route(
+            "/failover/v1/models",
+            get(handlers_failover::handle_list_models),
+        )
+        .route(
+            "/failover/v1/models/:model",
+            get(handlers_failover::handle_get_model),
+        )
+        .route(
+            "/failover/v1beta/models",
+            get(handlers_failover::handle_gemini_list_models),
+        )
+        .route(
+            "/failover/v1beta/models/:model",
+            get(handlers_failover::handle_gemini_get_model),
+        );
+
     let proxy_routes = Router::new()
         .route("/v1/chat/completions", post(handlers::handle_completions))
         .route("/v1/responses", post(handlers::handle_responses))
@@ -21,13 +49,7 @@ pub fn create_router() -> Router {
             "/v1/messages/count_tokens",
             post(handlers::handle_anthropic_count_tokens),
         )
-        .route("/v1/models", get(handlers::handle_list_models))
-        .route("/v1/models/:model", get(handlers::handle_get_model))
-        .route("/v1beta/models", get(handlers::handle_gemini_list_models))
-        .route(
-            "/v1beta/models/:model",
-            get(handlers::handle_gemini_get_model).post(handlers::handle_gemini),
-        )
+        .route("/v1beta/models/:model", post(handlers::handle_gemini))
         .layer(middleware::from_fn(auth_middleware));
 
     // Failover group: virtual model routing with sticky-failover.
@@ -49,24 +71,13 @@ pub fn create_router() -> Router {
             post(handlers_failover::handle_anthropic),
         )
         .route(
-            "/failover/v1/models",
-            get(handlers_failover::handle_list_models),
-        )
-        .route(
-            "/failover/v1/models/:model",
-            get(handlers_failover::handle_get_model),
-        )
-        .route(
-            "/failover/v1beta/models",
-            get(handlers_failover::handle_gemini_list_models),
-        )
-        .route(
             "/failover/v1beta/models/:model",
-            get(handlers_failover::handle_gemini_get_model).post(handlers_failover::handle_gemini),
+            post(handlers_failover::handle_gemini),
         )
         .layer(middleware::from_fn(auth_middleware));
 
     let router = Router::new()
+        .merge(public_model_routes)
         .merge(proxy_routes)
         .merge(failover_routes)
         .route("/health", get(health_check))

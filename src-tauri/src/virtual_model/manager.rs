@@ -55,7 +55,7 @@ struct DbResolvableCandidate {
     /// Aliased in SQL `ORDER BY` for sticky-first sorting; not read from the row.
     #[allow(dead_code)]
     sticky: i64,
-    // Capability columns (migration 026). Option<i64> so older rows still
+    // Capability columns (migration 026 + 030). Option<i64> so older rows still
     // deserialize; None is treated as the permissive default.
     supports_thinking: Option<i64>,
     supports_tools: Option<i64>,
@@ -68,6 +68,7 @@ struct DbResolvableCandidate {
     supports_response_format: Option<i64>,
     supports_stream_options: Option<i64>,
     supports_stop: Option<i64>,
+    supports_vision: Option<i64>,
     max_output_tokens: Option<i64>,
     extra_passthrough: Option<i64>,
 }
@@ -86,6 +87,7 @@ impl DbResolvableCandidate {
             supports_response_format: self.supports_response_format.unwrap_or(1) != 0,
             supports_stream_options: self.supports_stream_options.unwrap_or(1) != 0,
             supports_stop: self.supports_stop.unwrap_or(1) != 0,
+            supports_vision: self.supports_vision.unwrap_or(1) != 0,
             max_output_tokens: self.max_output_tokens.map(|v| v as u32),
             extra_passthrough: self.extra_passthrough.unwrap_or(1) != 0,
         }
@@ -148,6 +150,7 @@ impl VirtualRouter {
                 pm.supports_response_format,
                 pm.supports_stream_options,
                 pm.supports_stop,
+                pm.supports_vision,
                 pm.max_output_tokens,
                 pm.extra_passthrough
              FROM virtual_model_mappings m

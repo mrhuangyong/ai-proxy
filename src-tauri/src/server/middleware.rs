@@ -43,6 +43,11 @@ pub async fn auth_middleware(req: Request<Body>, next: axum::middleware::Next) -
 
     #[cfg(feature = "server")]
     {
+        // Model discovery must work without Authorization (Codex probes these).
+        if is_public_models_request(req.method(), req.uri().path()) {
+            return next.run(req).await;
+        }
+
         let pool = crate::db::get_pool().await;
 
         let enabled: (String,) =
@@ -92,4 +97,20 @@ pub async fn auth_middleware(req: Request<Body>, next: axum::middleware::Next) -
             (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
         }
     }
+}
+
+/// GET model-list / model-get paths that never require proxy auth.
+#[cfg(feature = "server")]
+fn is_public_models_request(method: &Method, path: &str) -> bool {
+    if *method != Method::GET {
+        return false;
+    }
+    path == "/v1/models"
+        || path.starts_with("/v1/models/")
+        || path == "/v1beta/models"
+        || path.starts_with("/v1beta/models/")
+        || path == "/failover/v1/models"
+        || path.starts_with("/failover/v1/models/")
+        || path == "/failover/v1beta/models"
+        || path.starts_with("/failover/v1beta/models/")
 }

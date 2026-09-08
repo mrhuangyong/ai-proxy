@@ -2300,6 +2300,21 @@ pub async fn handle_list_models() -> Response {
     let codex_models: Vec<Value> = models
         .iter()
         .map(|m| {
+            let input_modalities = if m.supports_vision {
+                json!(["text", "image"])
+            } else {
+                json!(["text"])
+            };
+            let mut experimental_tools = vec![
+                "apply_patch",
+                "shell",
+                "update_plan",
+                "web_search",
+            ];
+            if m.supports_vision {
+                // Keep view_image next to update_plan to match historical order.
+                experimental_tools.insert(3, "view_image");
+            }
             json!({
                 "slug": m.model_name,
                 "base_instructions": "You are Codex, a coding agent running in the user's terminal. Use the provided tools to accomplish tasks.",
@@ -2311,7 +2326,7 @@ pub async fn handle_list_models() -> Response {
                 "priority": 100,
                 "support_verbosity": true,
                 "supports_parallel_tool_calls": true,
-                "experimental_supported_tools": ["apply_patch", "shell", "update_plan", "view_image", "web_search"],
+                "experimental_supported_tools": experimental_tools,
                 "truncation_policy": { "type": "auto", "mode": "tokens", "limit": 1000 },
                 "supported_reasoning_levels": [
                     {"id": "none", "effort": "none", "description": "No reasoning"},
@@ -2333,7 +2348,7 @@ pub async fn handle_list_models() -> Response {
                     "text_verbosity",
                     "text_format"
                 ],
-                "input_modalities": ["text", "image"],
+                "input_modalities": input_modalities,
                 "output_modalities": ["text"],
             })
         })
@@ -2431,13 +2446,15 @@ struct ModelRouteInfo {
     provider_name: String,
     target_model: Option<String>,
     format: String,
+    /// Migration 030; missing/NULL treated as true (permissive).
+    supports_vision: bool,
 }
 
 async fn query_model_routes() -> Result<Vec<ModelRouteInfo>, ProxyError> {
     let pool = crate::db::get_pool().await;
 
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, String)>(
-        "SELECT pm.model_name, p.name, pm.target_model, p.format \
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, String, Option<i64>)>(
+        "SELECT pm.model_name, p.name, pm.target_model, p.format, pm.supports_vision \
          FROM provider_models pm \
          JOIN providers p ON pm.provider_id = p.id \
          WHERE pm.enabled = 1 AND p.enabled = 1 \
@@ -2450,11 +2467,12 @@ async fn query_model_routes() -> Result<Vec<ModelRouteInfo>, ProxyError> {
     Ok(rows
         .into_iter()
         .map(
-            |(model_name, provider_name, target_model, format)| ModelRouteInfo {
+            |(model_name, provider_name, target_model, format, supports_vision)| ModelRouteInfo {
                 model_name,
                 provider_name,
                 target_model,
                 format,
+                supports_vision: supports_vision.unwrap_or(1) != 0,
             },
         )
         .collect())

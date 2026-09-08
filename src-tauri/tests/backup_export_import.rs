@@ -291,6 +291,22 @@ async fn apply_all_migrations(pool: &SqlitePool) {
             sqlx::query(trimmed).execute(pool).await.unwrap();
         }
     }
+
+    // 030: supports_vision capability column (guarded — mirrors init.rs).
+    if !pragma_has_column(pool, "provider_models", "supports_vision").await {
+        let m30 = include_str!("../migrations/030_model_supports_vision.sql");
+        let stripped: String = m30
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await.unwrap();
+            }
+        }
+    }
 }
 
 /// `SELECT COUNT(*) > 0 FROM provider_models WHERE typeof(max_output_tokens)='text'

@@ -19,6 +19,8 @@ pub fn codex_models_catalog_path() -> PathBuf {
 /// model is always included and deduped; entries keep the selection order.
 /// `context_windows` maps model name → provider_models.context_window
 /// (unknown names — e.g. virtual models — fall back to 272000).
+/// `supports_vision` maps model name → whether image input is advertised;
+/// missing entries default to true (permissive, matches historical catalog).
 ///
 /// Field shape mirrors the codex-proven metadata from the proxy's /v1/models
 /// plus the catalog-template essentials (context_window, reasoning levels).
@@ -27,6 +29,7 @@ pub(crate) fn build_model_catalog(
     selected: &[String],
     default_model: &str,
     context_windows: &HashMap<String, u64>,
+    supports_vision: &HashMap<String, bool>,
 ) -> serde_json::Value {
     let mut names: Vec<String> = Vec::new();
     if !default_model.is_empty() {
@@ -42,6 +45,21 @@ pub(crate) fn build_model_catalog(
         .iter()
         .map(|name| {
             let ctx = context_windows.get(name).copied().unwrap_or(272000);
+            let vision = supports_vision.get(name).copied().unwrap_or(true);
+            let input_modalities = if vision {
+                serde_json::json!(["text", "image"])
+            } else {
+                serde_json::json!(["text"])
+            };
+            let mut experimental_tools = vec![
+                "apply_patch",
+                "shell",
+                "update_plan",
+                "web_search",
+            ];
+            if vision {
+                experimental_tools.insert(3, "view_image");
+            }
             serde_json::json!({
                 "slug": name,
                 "display_name": name,
@@ -60,8 +78,8 @@ pub(crate) fn build_model_catalog(
                 "max_context_window": ctx,
                 "effective_context_window_percent": 95,
                 "supports_parallel_tool_calls": true,
-                "experimental_supported_tools": ["apply_patch", "shell", "update_plan", "view_image", "web_search"],
-                "input_modalities": ["text", "image"],
+                "experimental_supported_tools": experimental_tools,
+                "input_modalities": input_modalities,
                 "supported_reasoning_levels": [
                     { "effort": "none", "description": "No reasoning" },
                     { "effort": "low", "description": "Light reasoning" },
@@ -164,6 +182,7 @@ pub async fn write_codex_config(
     context_window: u64,
     visible_models: Option<&[String]>,
     context_windows: &HashMap<String, u64>,
+    supports_vision: &HashMap<String, bool>,
 ) -> Result<PathBuf, String> {
     let path = codex_config_path();
     let mut config: HashMap<String, toml::Value> = if path.exists() {
@@ -192,7 +211,7 @@ pub async fn write_codex_config(
     // empty catalog — codex rejects a models.json without at least one model.
     match visible_models {
         Some(list) if !list.is_empty() => {
-            let catalog = build_model_catalog(list, model, context_windows);
+            let catalog = build_model_catalog(list, model, context_windows, supports_vision);
             let catalog_path = codex_models_catalog_path();
             let catalog_json = serde_json::to_string_pretty(&catalog)
                 .map_err(|e| format!("Failed to serialize model catalog: {}", e))?;
@@ -658,6 +677,7 @@ pub async fn write_config(
     context_window: u64,
     visible_models: Option<&[String]>,
     context_windows: &HashMap<String, u64>,
+    supports_vision: &HashMap<String, bool>,
 ) -> Result<PathBuf, String> {
     match app_type {
         AppType::CodexCli | AppType::CodexDesktop => {
@@ -669,6 +689,7 @@ pub async fn write_config(
                 context_window,
                 visible_models,
                 context_windows,
+                supports_vision,
             )
             .await
         }
@@ -1087,6 +1108,7 @@ mod catalog_tests {
             &["glm-5.3-flash".into(), "kimi-for-coding".into()],
             "glm-5.3-flash",
             &ctx,
+            &HashMap::new(),
         );
         let models = doc["models"].as_array().unwrap();
         let slugs: Vec<&str> = models.iter().map(|m| m["slug"].as_str().unwrap()).collect();
@@ -1094,11 +1116,22 @@ mod catalog_tests {
         assert_eq!(models[0]["context_window"], 1048576);
         assert_eq!(models[0]["max_context_window"], 1048576);
         assert_eq!(models[0]["visibility"], "list");
+        assert_eq!(models[0]["input_modalities"], serde_json::json!(["text", "image"]));
+        assert!(models[0]["experimental_supported_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "view_image"));
     }
 
     #[test]
     fn catalog_appends_default_model_when_not_selected() {
-        let doc = build_model_catalog(&["k3".to_string()], "glm-5.3-flash", &HashMap::new());
+        let doc = build_model_catalog(
+            &["k3".to_string()],
+            "glm-5.3-flash",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let slugs: Vec<&str> = doc["models"]
             .as_array()
             .unwrap()
@@ -1114,7 +1147,12 @@ mod catalog_tests {
 
     #[test]
     fn catalog_unknown_model_gets_default_context_window() {
-        let doc = build_model_catalog(&["virtual-vm".to_string()], "", &HashMap::new());
+        let doc = build_model_catalog(
+            &["virtual-vm".to_string()],
+            "",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let m = &doc["models"][0];
         assert_eq!(m["context_window"], 272000);
         assert_eq!(m["slug"], "virtual-vm");
@@ -1122,7 +1160,24 @@ mod catalog_tests {
 
     #[test]
     fn catalog_empty_selection_yields_empty_models_array() {
-        let doc = build_model_catalog(&[], "", &HashMap::new());
+        let doc = build_model_catalog(&[], "", &HashMap::new(), &HashMap::new());
         assert_eq!(doc["models"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn catalog_vision_false_drops_image_modality_and_view_image() {
+        let mut vision = HashMap::new();
+        vision.insert("text-only".to_string(), false);
+        let doc = build_model_catalog(
+            &["text-only".to_string()],
+            "",
+            &HashMap::new(),
+            &vision,
+        );
+        let m = &doc["models"][0];
+        assert_eq!(m["input_modalities"], serde_json::json!(["text"]));
+        let tools = m["experimental_supported_tools"].as_array().unwrap();
+        assert!(!tools.iter().any(|t| t == "view_image"));
+        assert!(tools.iter().any(|t| t == "web_search"));
     }
 }

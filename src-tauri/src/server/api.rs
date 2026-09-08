@@ -235,6 +235,7 @@ struct CapabilitiesInput {
     supports_response_format: Option<bool>,
     supports_stream_options: Option<bool>,
     supports_stop: Option<bool>,
+    supports_vision: Option<bool>,
     max_output_tokens: Option<i64>,
     extra_passthrough: Option<bool>,
 }
@@ -271,16 +272,16 @@ async fn create_provider(
              (id, provider_id, model_name, target_model, context_window, \
               supports_thinking, supports_tools, supports_temperature, supports_top_p, supports_top_k, \
               supports_presence_penalty, supports_frequency_penalty, supports_seed, \
-              supports_response_format, supports_stream_options, supports_stop, \
+              supports_response_format, supports_stream_options, supports_stop, supports_vision, \
               max_output_tokens, extra_passthrough) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&model_id).bind(&id).bind(&m.model_name).bind(&m.target_model).bind(m.context_window.unwrap_or(272000i64))
         .bind(caps.supports_thinking).bind(caps.supports_tools).bind(caps.supports_temperature)
         .bind(caps.supports_top_p).bind(caps.supports_top_k)
         .bind(caps.supports_presence_penalty).bind(caps.supports_frequency_penalty)
         .bind(caps.supports_seed).bind(caps.supports_response_format)
-        .bind(caps.supports_stream_options).bind(caps.supports_stop)
+        .bind(caps.supports_stream_options).bind(caps.supports_stop).bind(caps.supports_vision)
         .bind(caps.max_output_tokens).bind(caps.extra_passthrough)
         .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
     }
@@ -448,7 +449,7 @@ async fn update_provider_models(
                     "UPDATE provider_models SET model_name = ?, target_model = ?, context_window = ?, \
                      supports_thinking = ?, supports_tools = ?, supports_temperature = ?, supports_top_p = ?, supports_top_k = ?, \
                      supports_presence_penalty = ?, supports_frequency_penalty = ?, supports_seed = ?, \
-                     supports_response_format = ?, supports_stream_options = ?, supports_stop = ?, \
+                     supports_response_format = ?, supports_stream_options = ?, supports_stop = ?, supports_vision = ?, \
                      max_output_tokens = ?, extra_passthrough = ? WHERE id = ? AND provider_id = ?",
                 )
                 .bind(&m.model_name)
@@ -458,7 +459,7 @@ async fn update_provider_models(
                 .bind(caps.supports_top_p).bind(caps.supports_top_k)
                 .bind(caps.supports_presence_penalty).bind(caps.supports_frequency_penalty)
                 .bind(caps.supports_seed).bind(caps.supports_response_format)
-                .bind(caps.supports_stream_options).bind(caps.supports_stop)
+                .bind(caps.supports_stream_options).bind(caps.supports_stop).bind(caps.supports_vision)
                 .bind(caps.max_output_tokens).bind(caps.extra_passthrough)
                 .bind(mid)
                 .bind(provider_id)
@@ -478,9 +479,9 @@ async fn update_provider_models(
              (id, provider_id, model_name, target_model, context_window, \
               supports_thinking, supports_tools, supports_temperature, supports_top_p, supports_top_k, \
               supports_presence_penalty, supports_frequency_penalty, supports_seed, \
-              supports_response_format, supports_stream_options, supports_stop, \
+              supports_response_format, supports_stream_options, supports_stop, supports_vision, \
               max_output_tokens, extra_passthrough) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(provider_id, model_name) DO UPDATE SET \
                target_model = excluded.target_model, context_window = excluded.context_window, \
                supports_thinking = excluded.supports_thinking, supports_tools = excluded.supports_tools, \
@@ -488,7 +489,8 @@ async fn update_provider_models(
                supports_top_k = excluded.supports_top_k, supports_presence_penalty = excluded.supports_presence_penalty, \
                supports_frequency_penalty = excluded.supports_frequency_penalty, supports_seed = excluded.supports_seed, \
                supports_response_format = excluded.supports_response_format, supports_stream_options = excluded.supports_stream_options, \
-               supports_stop = excluded.supports_stop, max_output_tokens = excluded.max_output_tokens, \
+               supports_stop = excluded.supports_stop, supports_vision = excluded.supports_vision, \
+               max_output_tokens = excluded.max_output_tokens, \
                extra_passthrough = excluded.extra_passthrough",
         )
         .bind(&new_id)
@@ -500,7 +502,7 @@ async fn update_provider_models(
         .bind(caps.supports_top_p).bind(caps.supports_top_k)
         .bind(caps.supports_presence_penalty).bind(caps.supports_frequency_penalty)
         .bind(caps.supports_seed).bind(caps.supports_response_format)
-        .bind(caps.supports_stream_options).bind(caps.supports_stop)
+        .bind(caps.supports_stream_options).bind(caps.supports_stop).bind(caps.supports_vision)
         .bind(caps.max_output_tokens).bind(caps.extra_passthrough)
         .execute(pool)
         .await
@@ -540,6 +542,7 @@ struct CapOverrides {
     supports_response_format: i64,
     supports_stream_options: i64,
     supports_stop: i64,
+    supports_vision: i64,
     /// None → NULL (no clamp).
     max_output_tokens: Option<i64>,
     extra_passthrough: i64,
@@ -562,6 +565,7 @@ fn cap_overrides_for(caps: Option<&CapabilitiesInput>) -> CapOverrides {
             supports_response_format: 1,
             supports_stream_options: 1,
             supports_stop: 1,
+            supports_vision: 1,
             max_output_tokens: None,
             extra_passthrough: 1,
         },
@@ -577,6 +581,7 @@ fn cap_overrides_for(caps: Option<&CapabilitiesInput>) -> CapOverrides {
             supports_response_format: b(c.supports_response_format),
             supports_stream_options: b(c.supports_stream_options),
             supports_stop: b(c.supports_stop),
+            supports_vision: b(c.supports_vision),
             max_output_tokens: c.max_output_tokens,
             extra_passthrough: b(c.extra_passthrough),
         },

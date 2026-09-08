@@ -36,6 +36,8 @@ export interface ModelCapabilities {
   supports_response_format: boolean
   supports_stream_options: boolean
   supports_stop: boolean
+  /** When false, Codex gets text-only input_modalities and images are stripped. */
+  supports_vision: boolean
   /** Null = do not clamp. */
   max_output_tokens: number | null
   /** When false, the unguarded `extra` passthrough is cleared. */

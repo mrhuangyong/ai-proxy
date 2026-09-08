@@ -95,6 +95,7 @@ struct DbProviderModel {
     supports_response_format: Option<i64>,
     supports_stream_options: Option<i64>,
     supports_stop: Option<i64>,
+    supports_vision: Option<i64>,
     max_output_tokens: Option<i64>,
     extra_passthrough: Option<i64>,
 }
@@ -102,7 +103,7 @@ struct DbProviderModel {
 impl DbProviderModel {
     /// Constant SELECT clause for the capability columns, used by every
     /// query that reads provider_models so they all stay in sync.
-    const CAP_COLS: &'static str = "pm.supports_thinking, pm.supports_tools, pm.supports_temperature, pm.supports_top_p, pm.supports_top_k, pm.supports_presence_penalty, pm.supports_frequency_penalty, pm.supports_seed, pm.supports_response_format, pm.supports_stream_options, pm.supports_stop, pm.max_output_tokens, pm.extra_passthrough";
+    const CAP_COLS: &'static str = "pm.supports_thinking, pm.supports_tools, pm.supports_temperature, pm.supports_top_p, pm.supports_top_k, pm.supports_presence_penalty, pm.supports_frequency_penalty, pm.supports_seed, pm.supports_response_format, pm.supports_stream_options, pm.supports_stop, pm.supports_vision, pm.max_output_tokens, pm.extra_passthrough";
 
     fn capabilities(&self) -> ModelCapabilities {
         ModelCapabilities {
@@ -117,6 +118,7 @@ impl DbProviderModel {
             supports_response_format: self.supports_response_format.unwrap_or(1) != 0,
             supports_stream_options: self.supports_stream_options.unwrap_or(1) != 0,
             supports_stop: self.supports_stop.unwrap_or(1) != 0,
+            supports_vision: self.supports_vision.unwrap_or(1) != 0,
             max_output_tokens: self.max_output_tokens.map(|v| v as u32),
             extra_passthrough: self.extra_passthrough.unwrap_or(1) != 0,
         }

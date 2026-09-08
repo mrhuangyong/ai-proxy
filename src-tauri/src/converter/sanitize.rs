@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use super::ir::IrRequest;
 
 /// Per-model capability descriptor. Mirrors the columns added by migration 026
-/// (`provider_models`). All booleans default to `true` (permissive); `None`
-/// means "do not clamp".
+/// (`provider_models`) plus `supports_vision` (migration 030). All booleans
+/// default to `true` (permissive); `None` means "do not clamp".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ModelCapabilities {
     pub supports_thinking: bool,
@@ -36,12 +36,20 @@ pub struct ModelCapabilities {
     pub supports_response_format: bool,
     pub supports_stream_options: bool,
     pub supports_stop: bool,
+    /// When `false`, image content parts are stripped from messages (and Codex
+    /// metadata advertises text-only `input_modalities`).
+    #[serde(default = "default_true")]
+    pub supports_vision: bool,
     /// Upper bound for `ir.max_tokens`. `None` = leave untouched.
     pub max_output_tokens: Option<u32>,
     /// When `false`, the unguarded `ir.extra` passthrough (which injects
     /// arbitrary client keys like `chat_template_kwargs` / `logit_bias` into
     /// every generator) is cleared. This is the largest parameter-leak vector.
     pub extra_passthrough: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ModelCapabilities {
@@ -61,6 +69,7 @@ impl ModelCapabilities {
             supports_response_format: true,
             supports_stream_options: true,
             supports_stop: true,
+            supports_vision: true,
             max_output_tokens: None,
             extra_passthrough: true,
         }
@@ -110,6 +119,20 @@ pub fn sanitize_ir_for_capabilities(ir: &mut IrRequest, caps: &ModelCapabilities
     }
     if !caps.supports_stop && ir.stop_sequences.take().is_some() {
         changed.push("stop_sequences");
+    }
+    if !caps.supports_vision {
+        let mut stripped_images = false;
+        for msg in &mut ir.messages {
+            let before = msg.content.len();
+            msg.content
+                .retain(|p| !matches!(p, super::ir::IrContentPart::Image { .. }));
+            if msg.content.len() != before {
+                stripped_images = true;
+            }
+        }
+        if stripped_images {
+            changed.push("image");
+        }
     }
     if let Some(cap) = caps.max_output_tokens {
         if let Some(mt) = ir.max_tokens {
@@ -205,6 +228,7 @@ mod tests {
             supports_response_format: false,
             supports_stream_options: false,
             supports_stop: false,
+            supports_vision: false,
             max_output_tokens: None,
             extra_passthrough: false,
         };
@@ -270,5 +294,53 @@ mod tests {
         // Everything else stays.
         assert!(ir.thinking.is_some());
         assert!(ir.tools.is_some());
+    }
+
+    #[test]
+    fn disabling_vision_strips_image_parts_keeps_text() {
+        use crate::converter::ir::{IrContentPart, IrMessage, IrRole};
+
+        let mut ir = full_ir();
+        ir.messages = vec![IrMessage {
+            role: IrRole::User,
+            content: vec![
+                IrContentPart::Text {
+                    text: "describe".into(),
+                    citations: None,
+                },
+                IrContentPart::Image {
+                    url: Some("https://example.com/a.png".into()),
+                    data: None,
+                    media_type: Some("image/png".into()),
+                },
+                IrContentPart::Text {
+                    text: "please".into(),
+                    citations: None,
+                },
+            ],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let caps = ModelCapabilities {
+            supports_vision: false,
+            ..ModelCapabilities::permissive()
+        };
+        sanitize_ir_for_capabilities(&mut ir, &caps);
+        assert_eq!(ir.messages[0].content.len(), 2);
+        assert!(matches!(
+            ir.messages[0].content[0],
+            IrContentPart::Text { ref text, .. } if text == "describe"
+        ));
+        assert!(matches!(
+            ir.messages[0].content[1],
+            IrContentPart::Text { ref text, .. } if text == "please"
+        ));
+        assert!(
+            !ir.messages[0]
+                .content
+                .iter()
+                .any(|p| matches!(p, IrContentPart::Image { .. }))
+        );
     }
 }

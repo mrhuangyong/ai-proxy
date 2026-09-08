@@ -423,6 +423,7 @@ function defaultCapabilities(): ModelCapabilities {
     supports_response_format: true,
     supports_stream_options: true,
     supports_stop: true,
+    supports_vision: true,
     max_output_tokens: null,
     extra_passthrough: true,
   }
@@ -431,6 +432,7 @@ function defaultCapabilities(): ModelCapabilities {
 /** List of capability toggles for the editor popover. `label` is the user-
  * facing name; `key` is the ModelCapabilities field. */
 const CAP_TOGGLES: Array<{ key: keyof ModelCapabilities; label: string }> = [
+  { key: 'supports_vision', label: '视觉 / 图像输入' },
   { key: 'supports_thinking', label: '思考 / 推理' },
   { key: 'supports_tools', label: '工具调用' },
   { key: 'supports_temperature', label: 'temperature' },
@@ -592,7 +594,7 @@ function openEditModal(row: Provider) {
       model_name: m.model_name,
       target_model: m.target_model ?? null,
       context_window: m.context_window ?? null,
-      capabilities: m.capabilities ?? defaultCapabilities(),
+      capabilities: { ...defaultCapabilities(), ...(m.capabilities ?? {}) },
     })),
   }
   showModal.value = true
