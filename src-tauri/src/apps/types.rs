@@ -96,6 +96,10 @@ pub struct AppConfig {
     pub proxy_url: Option<String>,
     pub launched_at: Option<String>,
     pub opencode_models: Option<Vec<String>>,
+    /// codex only: models shown in codex's /model picker. Written as the
+    /// `model_catalog_json` catalog at launch; empty/None → no catalog
+    /// (auto-discovery via the proxy's /v1/models shows everything).
+    pub visible_models: Option<Vec<String>>,
     pub status: Option<String>,
 }
 
@@ -107,6 +111,8 @@ pub struct LaunchRequest {
     pub model_sonnet: Option<String>,
     pub model_opus: Option<String>,
     pub models: Option<Vec<String>>,
+    /// codex only: see `AppConfig::visible_models`.
+    pub visible_models: Option<Vec<String>>,
     pub work_dir: Option<String>,
 }
 

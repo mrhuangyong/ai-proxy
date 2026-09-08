@@ -9,6 +9,72 @@ pub fn codex_config_path() -> PathBuf {
     home.join(".codex").join("config.toml")
 }
 
+pub fn codex_models_catalog_path() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    home.join(".codex").join("models.json")
+}
+
+/// Build a codex model-catalog document (`{"models": [...]}`) restricting the
+/// /model picker to `selected` (the launch dialog's "可见模型"). The default
+/// model is always included and deduped; entries keep the selection order.
+/// `context_windows` maps model name → provider_models.context_window
+/// (unknown names — e.g. virtual models — fall back to 272000).
+///
+/// Field shape mirrors the codex-proven metadata from the proxy's /v1/models
+/// plus the catalog-template essentials (context_window, reasoning levels).
+/// codex applies its own defaults for anything omitted.
+pub(crate) fn build_model_catalog(
+    selected: &[String],
+    default_model: &str,
+    context_windows: &HashMap<String, u64>,
+) -> serde_json::Value {
+    let mut names: Vec<String> = Vec::new();
+    if !default_model.is_empty() {
+        names.push(default_model.to_string());
+    }
+    for name in selected {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+
+    let models: Vec<serde_json::Value> = names
+        .iter()
+        .map(|name| {
+            let ctx = context_windows.get(name).copied().unwrap_or(272000);
+            serde_json::json!({
+                "slug": name,
+                "display_name": name,
+                "description": serde_json::Value::Null,
+                "visibility": "list",
+                "supported_in_api": true,
+                "priority": 100,
+                "base_instructions": "You are Codex, a coding agent running in the user's terminal. Use the provided tools to accomplish tasks.",
+                "supports_reasoning_summaries": true,
+                "default_reasoning_summary": "auto",
+                "support_verbosity": true,
+                "apply_patch_tool_type": "freeform",
+                "shell_type": "default",
+                "truncation_policy": { "mode": "tokens", "limit": 1000 },
+                "context_window": ctx,
+                "max_context_window": ctx,
+                "effective_context_window_percent": 95,
+                "supports_parallel_tool_calls": true,
+                "experimental_supported_tools": ["apply_patch", "shell", "update_plan", "view_image", "web_search"],
+                "input_modalities": ["text", "image"],
+                "supported_reasoning_levels": [
+                    { "effort": "none", "description": "No reasoning" },
+                    { "effort": "low", "description": "Light reasoning" },
+                    { "effort": "medium", "description": "Medium reasoning" },
+                    { "effort": "high", "description": "High reasoning" }
+                ]
+            })
+        })
+        .collect();
+
+    serde_json::json!({ "models": models })
+}
+
 pub fn codex_auth_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     home.join(".codex").join("auth.json")
@@ -96,6 +162,8 @@ pub async fn write_codex_config(
     api_key: &str,
     preserve_auth: bool,
     context_window: u64,
+    visible_models: Option<&[String]>,
+    context_windows: &HashMap<String, u64>,
 ) -> Result<PathBuf, String> {
     let path = codex_config_path();
     let mut config: HashMap<String, toml::Value> = if path.exists() {
@@ -115,6 +183,33 @@ pub async fn write_codex_config(
         config.remove("model");
     } else {
         config.insert("model".to_string(), toml::Value::String(model.to_string()));
+    }
+
+    // Visible-model catalog (codex /model picker). A non-empty selection
+    // replaces auto-discovery with a static catalog; empty/None removes any
+    // stale `model_catalog_json` (ours or hand-edited from external guides)
+    // so the picker falls back to the proxy's /v1/models. Never write an
+    // empty catalog — codex rejects a models.json without at least one model.
+    match visible_models {
+        Some(list) if !list.is_empty() => {
+            let catalog = build_model_catalog(list, model, context_windows);
+            let catalog_path = codex_models_catalog_path();
+            let catalog_json = serde_json::to_string_pretty(&catalog)
+                .map_err(|e| format!("Failed to serialize model catalog: {}", e))?;
+            atomic_write(&catalog_path, &catalog_json).await?;
+            tracing::info!(
+                "Wrote codex model catalog ({} models) to {:?}",
+                list.len(),
+                catalog_path
+            );
+            config.insert(
+                "model_catalog_json".to_string(),
+                toml::Value::String(catalog_path.to_string_lossy().to_string()),
+            );
+        }
+        _ => {
+            config.remove("model_catalog_json");
+        }
     }
 
     config.insert(
@@ -561,10 +656,21 @@ pub async fn write_config(
     api_key: &str,
     preserve_auth: bool,
     context_window: u64,
+    visible_models: Option<&[String]>,
+    context_windows: &HashMap<String, u64>,
 ) -> Result<PathBuf, String> {
     match app_type {
         AppType::CodexCli | AppType::CodexDesktop => {
-            write_codex_config(model, proxy_base, api_key, preserve_auth, context_window).await
+            write_codex_config(
+                model,
+                proxy_base,
+                api_key,
+                preserve_auth,
+                context_window,
+                visible_models,
+                context_windows,
+            )
+            .await
         }
         AppType::ClaudeCli => {
             write_claude_cli_config(
@@ -963,5 +1069,60 @@ mod tests {
             .expect("Failed to read back file");
 
         assert_eq!(read_back, content);
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    fn ctx_map(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn catalog_includes_default_model_first_deduped() {
+        let ctx = ctx_map(&[("glm-5.3-flash", 1048576), ("glm-5.3", 262144)]);
+        let doc = build_model_catalog(
+            &["glm-5.3-flash".into(), "kimi-for-coding".into()],
+            "glm-5.3-flash",
+            &ctx,
+        );
+        let models = doc["models"].as_array().unwrap();
+        let slugs: Vec<&str> = models.iter().map(|m| m["slug"].as_str().unwrap()).collect();
+        assert_eq!(slugs, vec!["glm-5.3-flash", "kimi-for-coding"]);
+        assert_eq!(models[0]["context_window"], 1048576);
+        assert_eq!(models[0]["max_context_window"], 1048576);
+        assert_eq!(models[0]["visibility"], "list");
+    }
+
+    #[test]
+    fn catalog_appends_default_model_when_not_selected() {
+        let doc = build_model_catalog(&["k3".to_string()], "glm-5.3-flash", &HashMap::new());
+        let slugs: Vec<&str> = doc["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["slug"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            slugs,
+            vec!["glm-5.3-flash", "k3"],
+            "default first, then selection order"
+        );
+    }
+
+    #[test]
+    fn catalog_unknown_model_gets_default_context_window() {
+        let doc = build_model_catalog(&["virtual-vm".to_string()], "", &HashMap::new());
+        let m = &doc["models"][0];
+        assert_eq!(m["context_window"], 272000);
+        assert_eq!(m["slug"], "virtual-vm");
+    }
+
+    #[test]
+    fn catalog_empty_selection_yields_empty_models_array() {
+        let doc = build_model_catalog(&[], "", &HashMap::new());
+        assert_eq!(doc["models"].as_array().unwrap().len(), 0);
     }
 }

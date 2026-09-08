@@ -117,6 +117,24 @@
         </template>
 
         <template v-if="isCodexApp(launchForm.appType)">
+          <n-space vertical size="small" style="width: 100%">
+            <n-text depth="3" style="font-size: 13px">可见模型（可多选）</n-text>
+            <n-select
+              v-model:value="launchForm.visibleModels"
+              :options="modelOptions"
+              multiple
+              filterable
+              tag
+              clearable
+              placeholder="留空则显示代理全部模型"
+            />
+            <n-text depth="3" style="font-size: 12px">
+              选中后注入 codex 模型目录（model_catalog_json），/model 选择器只显示这些模型；默认模型始终包含
+            </n-text>
+          </n-space>
+        </template>
+
+        <template v-if="isCodexApp(launchForm.appType)">
           <n-space justify="space-between" align="center">
             <n-space vertical size="small">
               <n-text depth="3" style="font-size: 13px">保留官方登录</n-text>
@@ -239,6 +257,7 @@ const launchForm = ref({
   work_dir: '',
   preserveAuth: false,
   models: [] as string[],
+  visibleModels: [] as string[],
 })
 
 const showPathModal = ref(false)
@@ -383,6 +402,7 @@ async function openLaunchModal(app: AppConfig) {
     work_dir: app.work_dir || '',
     preserveAuth: false,
     models: app.opencode_models || [],
+    visibleModels: app.visible_models || [],
   }
 
   if (isCodexApp(app.app_type)) {
@@ -440,6 +460,10 @@ async function handleLaunch() {
       body.models = launchForm.value.models
       // Use first selected model as the "model" field for DB storage
       body.model = launchForm.value.models[0]
+    }
+    if (isCodexApp(launchForm.value.appType)) {
+      // 空数组也要提交：表示清空目录限制，后端会删除 model_catalog_json。
+      body.visible_models = launchForm.value.visibleModels
     }
 
     await api<void>('/api/apps/launch', {

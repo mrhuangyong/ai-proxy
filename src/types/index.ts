@@ -141,6 +141,8 @@ export interface AppConfig {
   model_sonnet: string | null
   model_opus: string | null
   opencode_models: string[] | null
+  /** codex only: models shown in codex's /model picker; empty = all. */
+  visible_models: string[] | null
   work_dir: string | null
   proxy_url: string | null
   launched_at: string | null
@@ -154,6 +156,8 @@ export interface LaunchRequest {
   model_sonnet?: string
   model_opus?: string
   models?: string[]
+  /** codex only: see AppConfig.visible_models. */
+  visible_models?: string[]
   work_dir?: string
 }
 

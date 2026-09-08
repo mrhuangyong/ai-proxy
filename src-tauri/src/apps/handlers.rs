@@ -12,6 +12,7 @@ fn build_model_config(body: &LaunchRequest) -> Option<String> {
         && body.model_sonnet.is_none()
         && body.model_opus.is_none()
         && body.models.is_none()
+        && body.visible_models.is_none()
     {
         return None;
     }
@@ -32,17 +33,26 @@ fn build_model_config(body: &LaunchRequest) -> Option<String> {
             .collect();
         map.insert("models".into(), serde_json::Value::Array(arr));
     }
+    if let Some(ref v) = body.visible_models {
+        let arr: Vec<serde_json::Value> = v
+            .iter()
+            .map(|m| serde_json::Value::String(m.clone()))
+            .collect();
+        map.insert("visible_models".into(), serde_json::Value::Array(arr));
+    }
     Some(serde_json::Value::Object(map).to_string())
 }
 
-fn parse_model_config(
-    json: Option<&str>,
-) -> (
+/// (haiku, sonnet, opus, opencode models, codex visible models)
+type ParsedModelConfig = (
     Option<String>,
     Option<String>,
     Option<String>,
     Option<Vec<String>>,
-) {
+    Option<Vec<String>>,
+);
+
+fn parse_model_config(json: Option<&str>) -> ParsedModelConfig {
     json.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         .map(|v| {
             let obj = v.as_object();
@@ -66,9 +76,17 @@ fn parse_model_config(
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect()
                 });
-            (haiku, sonnet, opus, models)
+            let visible_models = obj
+                .and_then(|o| o.get("visible_models"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                });
+            (haiku, sonnet, opus, models, visible_models)
         })
-        .unwrap_or((None, None, None, None))
+        .unwrap_or((None, None, None, None, None))
 }
 
 // ── Virtual model detection ────────────────────────────────────────────────
@@ -123,7 +141,7 @@ pub async fn list_apps() -> Json<ApiResponse<Vec<AppConfig>>> {
         let config_path_str = config::config_path_for(&app_type)
             .to_string_lossy()
             .to_string();
-        let (model_haiku, model_sonnet, model_opus, opencode_models) =
+        let (model_haiku, model_sonnet, model_opus, opencode_models, visible_models) =
             parse_model_config(db_rec.as_ref().and_then(|r| r.model_config.as_deref()));
 
         let app_config = AppConfig {
@@ -171,6 +189,7 @@ pub async fn list_apps() -> Json<ApiResponse<Vec<AppConfig>>> {
             model_sonnet,
             model_opus,
             opencode_models,
+            visible_models,
             work_dir: db_rec.as_ref().and_then(|r| {
                 if r.work_dir.as_ref().map_or(true, |s| s.is_empty()) {
                     None
@@ -350,6 +369,26 @@ pub async fn launch_app(
         let models = body.models.as_deref().unwrap_or(&[]);
         config::write_opencode_config(models, &proxy_url, &api_key).await
     } else {
+        // codex visible-model catalog: context_window lookup for the selected
+        // slugs (one query over enabled provider models; unknown names — e.g.
+        // virtual models — fall back to 272000 inside the catalog builder).
+        let context_windows: HashMap<String, u64> = if app_type.is_codex() {
+            sqlx::query_as::<_, (String, i64)>(
+                "SELECT pm.model_name, COALESCE(MAX(pm.context_window), 272000)
+                 FROM provider_models pm
+                 JOIN providers p ON p.id = pm.provider_id
+                 WHERE pm.enabled = 1 AND p.enabled = 1
+                 GROUP BY pm.model_name COLLATE NOCASE",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, ctx)| (name, ctx as u64))
+            .collect()
+        } else {
+            HashMap::new()
+        };
         config::write_config(
             &app_type,
             &body.model,
@@ -360,6 +399,8 @@ pub async fn launch_app(
             &api_key,
             preserve_auth,
             context_window,
+            body.visible_models.as_deref(),
+            &context_windows,
         )
         .await
     };
@@ -445,6 +486,7 @@ pub async fn launch_app(
         model_sonnet: body.model_sonnet,
         model_opus: body.model_opus,
         opencode_models: body.models,
+        visible_models: body.visible_models,
         work_dir: body.work_dir,
         proxy_url: Some(proxy_url),
         launched_at: Some(now),
@@ -597,5 +639,47 @@ async fn sync_claude_desktop_route_rules(
             claude_model,
             target_model
         );
+    }
+}
+
+#[cfg(test)]
+mod model_config_tests {
+    use super::*;
+    use crate::apps::types::LaunchRequest;
+
+    fn req(visible: Option<Vec<String>>) -> LaunchRequest {
+        LaunchRequest {
+            app_type: "codex_desktop".into(),
+            model: "glm-5.3-flash".into(),
+            model_haiku: None,
+            model_sonnet: None,
+            model_opus: None,
+            models: None,
+            visible_models: visible,
+            work_dir: None,
+        }
+    }
+
+    #[test]
+    fn visible_models_roundtrip() {
+        let json = build_model_config(&req(Some(vec!["a".into(), "b".into()])));
+        let (_, _, _, _, visible) = parse_model_config(json.as_deref());
+        assert_eq!(visible, Some(vec!["a".to_string(), "b".to_string()]));
+    }
+
+    #[test]
+    fn empty_visible_models_is_preserved_as_empty_selection() {
+        // Some([]) ≠ None: an explicit empty selection must persist so the
+        // dialog round-trips the "no catalog" state.
+        let json = build_model_config(&req(Some(vec![])));
+        assert!(json.as_deref().unwrap().contains("visible_models"));
+        let (_, _, _, _, visible) = parse_model_config(json.as_deref());
+        assert_eq!(visible, Some(vec![]));
+    }
+
+    #[test]
+    fn none_visible_models_omits_key() {
+        let json = build_model_config(&req(None));
+        assert!(json.is_none());
     }
 }
