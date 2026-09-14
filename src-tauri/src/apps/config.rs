@@ -1116,7 +1116,10 @@ mod catalog_tests {
         assert_eq!(models[0]["context_window"], 1048576);
         assert_eq!(models[0]["max_context_window"], 1048576);
         assert_eq!(models[0]["visibility"], "list");
-        assert_eq!(models[0]["input_modalities"], serde_json::json!(["text", "image"]));
+        assert_eq!(
+            models[0]["input_modalities"],
+            serde_json::json!(["text", "image"])
+        );
         assert!(models[0]["experimental_supported_tools"]
             .as_array()
             .unwrap()
@@ -1168,12 +1171,7 @@ mod catalog_tests {
     fn catalog_vision_false_drops_image_modality_and_view_image() {
         let mut vision = HashMap::new();
         vision.insert("text-only".to_string(), false);
-        let doc = build_model_catalog(
-            &["text-only".to_string()],
-            "",
-            &HashMap::new(),
-            &vision,
-        );
+        let doc = build_model_catalog(&["text-only".to_string()], "", &HashMap::new(), &vision);
         let m = &doc["models"][0];
         assert_eq!(m["input_modalities"], serde_json::json!(["text"]));
         let tools = m["experimental_supported_tools"].as_array().unwrap();

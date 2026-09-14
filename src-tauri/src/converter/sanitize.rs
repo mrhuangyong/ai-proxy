@@ -336,11 +336,9 @@ mod tests {
             ir.messages[0].content[1],
             IrContentPart::Text { ref text, .. } if text == "please"
         ));
-        assert!(
-            !ir.messages[0]
-                .content
-                .iter()
-                .any(|p| matches!(p, IrContentPart::Image { .. }))
-        );
+        assert!(!ir.messages[0]
+            .content
+            .iter()
+            .any(|p| matches!(p, IrContentPart::Image { .. })));
     }
 }
