@@ -2274,22 +2274,17 @@ pub async fn handle_list_models() -> Response {
         Err(e) => return e.into_response(),
     };
 
+    // Only the qualified `provider_name/model_name` form is advertised, so
+    // every listed id unambiguously pins a provider route.
     let data: Vec<Value> = models
         .iter()
-        .flat_map(|m| {
-            let bare = json!({
-                "id": m.model_name,
-                "object": "model",
-                "created": 0,
-                "owned_by": m.provider_name,
-            });
-            let qualified = json!({
+        .map(|m| {
+            json!({
                 "id": qualified_model_id(&m.provider_name, &m.model_name),
                 "object": "model",
                 "created": 0,
                 "owned_by": m.provider_name,
-            });
-            vec![bare, qualified]
+            })
         })
         .collect();
 
@@ -2316,10 +2311,10 @@ pub async fn handle_list_models() -> Response {
                 experimental_tools.insert(3, "view_image");
             }
             json!({
-                "slug": m.model_name,
+                "slug": qualified_model_id(&m.provider_name, &m.model_name),
                 "base_instructions": "You are Codex, a coding agent running in the user's terminal. Use the provided tools to accomplish tasks.",
                 "name": qualified_model_id(&m.provider_name, &m.model_name),
-                "display_name": m.model_name,
+                "display_name": qualified_model_id(&m.provider_name, &m.model_name),
                 "shell_type": "default",
                 "visibility": "list",
                 "supported_in_api": true,
@@ -2391,20 +2386,16 @@ pub async fn handle_gemini_list_models() -> Response {
         Err(e) => return e.into_response(),
     };
 
+    // Only the qualified `models/provider_name/model_name` form is advertised.
     let gemini_models: Vec<Value> = models
         .iter()
-        .flat_map(|m| {
-            let bare = json!({
-                "name": format!("models/{}", m.model_name),
-                "displayName": m.model_name,
+        .map(|m| {
+            let qualified = qualified_model_id(&m.provider_name, &m.model_name);
+            json!({
+                "name": format!("models/{}", qualified),
+                "displayName": qualified,
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
-            });
-            let qualified = json!({
-                "name": format!("models/{}", qualified_model_id(&m.provider_name, &m.model_name)),
-                "displayName": qualified_model_id(&m.provider_name, &m.model_name),
-                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
-            });
-            vec![bare, qualified]
+            })
         })
         .collect();
 
