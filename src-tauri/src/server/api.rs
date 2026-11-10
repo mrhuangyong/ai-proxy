@@ -408,6 +408,34 @@ async fn update_provider(
     Ok(ok(()))
 }
 
+/// Decrypt the provider's stored API key (first row by created_at, mirroring
+/// `fetch_api_keys_info` ordering) so the edit form can echo it back.
+/// `Ok(None)` when the provider has no key. Read-only: unlike
+/// `stored_provider_key`, usage counters are not touched.
+async fn get_provider_api_key(
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<Option<String>>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let row: Option<(Vec<u8>, Vec<u8>)> =
+        sqlx::query_as("SELECT encrypted_key, nonce FROM api_keys WHERE provider_id = ? ORDER BY created_at LIMIT 1")
+            .bind(&id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| err_json(e.to_string()))?;
+
+    let Some((encrypted_key, nonce)) = row else {
+        return Ok(ok(None));
+    };
+    if nonce.len() != 12 {
+        return Err(err_json("已存 API Key 的 Nonce 格式错误".into()));
+    }
+    let mut nonce_arr = [0u8; 12];
+    nonce_arr.copy_from_slice(&nonce);
+    let key = decrypt_api_key(&encrypted_key, &nonce_arr)
+        .map_err(|e| err_json(format!("已存 API Key 解密失败: {}", e)))?;
+    Ok(ok(Some(key)))
+}
+
 /// Diff/upsert a provider's models while preserving existing row ids.
 ///
 /// `virtual_model_mappings.provider_model_id` references `provider_models.id`
@@ -2379,6 +2407,7 @@ pub fn api_routes() -> axum::Router {
             routing::put(update_provider).delete(delete_provider),
         )
         .route("/providers/:id/toggle", routing::put(toggle_provider))
+        .route("/providers/:id/api-key", routing::get(get_provider_api_key))
         .route("/logs", axum::routing::get(list_logs).delete(clear_logs))
         .route("/logs/:id", axum::routing::get(get_log))
         .route("/usage", axum::routing::get(get_usage).delete(clear_usage))
