@@ -427,7 +427,7 @@ async fn get_provider_api_key(
         return Ok(ok(None));
     };
     if nonce.len() != 12 {
-        return Err(err_json("已存 API Key 的 Nonce 格式错误".into()));
+        return Err(err_json("已存 API Key 的 Nonce 格式错误"));
     }
     let mut nonce_arr = [0u8; 12];
     nonce_arr.copy_from_slice(&nonce);
