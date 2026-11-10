@@ -469,6 +469,10 @@ const form = ref({
   }>,
 })
 
+/** Key echoed back from the server when the edit modal opens; the update
+ * payload only carries `api_key` when the user actually changed it. */
+const originalApiKey = ref('')
+
 const formatOptions = [
   { label: 'OpenAI Completions', value: 'completions' },
   { label: 'OpenAI Responses', value: 'responses' },
@@ -597,7 +601,19 @@ function openEditModal(row: Provider) {
       capabilities: { ...defaultCapabilities(), ...(m.capabilities ?? {}) },
     })),
   }
+  originalApiKey.value = ''
   showModal.value = true
+  // Echo the stored key back into the form (fetched separately so the
+  // provider list response never carries key material). On failure the field
+  // stays blank and the "留空则不修改" placeholder still applies.
+  api<string | null>(`/api/providers/${row.id}/api-key`)
+    .then((key) => {
+      if (editingId.value === row.id) {
+        form.value.api_key = key || ''
+        originalApiKey.value = key || ''
+      }
+    })
+    .catch(() => {})
 }
 
 function openTestModal(row: Provider) {
@@ -797,7 +813,7 @@ async function handleSubmit() {
           capabilities: m.capabilities,
         })),
       }
-      if (form.value.api_key) {
+      if (form.value.api_key && form.value.api_key !== originalApiKey.value) {
         body.api_key = form.value.api_key
       }
       await api(`/api/providers/${editingId.value}`, {
