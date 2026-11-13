@@ -11,6 +11,10 @@ pub struct Provider {
     pub endpoint_path: Option<String>,
     pub enabled: bool,
     pub upstream_user_agent: String,
+    /// `standard` (static API key, default) or `codex_oauth` (ChatGPT OAuth
+    /// channel; bearer token comes from `codex_accounts`, migration 031).
+    #[serde(default)]
+    pub provider_kind: String,
     pub models: Vec<ProviderModel>,
     pub api_keys: Vec<ApiKeyInfo>,
     /// Upstream protocols this provider speaks. The primary row mirrors

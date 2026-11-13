@@ -1,6 +1,7 @@
 pub mod api;
 pub mod handlers;
 pub mod handlers_failover;
+pub mod images;
 pub mod middleware;
 pub mod passthrough;
 pub mod retry_invisible;

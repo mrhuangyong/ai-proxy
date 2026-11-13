@@ -27,6 +27,10 @@ pub struct ResolvedRoute {
     pub target_model: String,
     pub endpoint_path: String,
     pub upstream_user_agent: String,
+    /// `standard` | `codex_oauth` — selects the outbound auth strategy
+    /// (static API key vs refreshed OAuth bearer + ChatGPT account headers).
+    #[serde(default)]
+    pub provider_kind: String,
     pub capabilities: ModelCapabilities,
     /// All configured upstream protocols (primary first). Used to decide
     /// whether a request can be forwarded as-is (passthrough) when the
@@ -51,6 +55,17 @@ struct DbProvider {
     endpoint_path: Option<String>,
     enabled: i64,
     upstream_user_agent: String,
+    // Migration 031. sqlx errors on missing columns, so older DBs (created
+    // before this migration ran) must never SELECT this column explicitly —
+    // all reads go through PROVIDER_COLS which is only used after init_db().
+    provider_kind: String,
+}
+
+impl DbProvider {
+    /// Shared SELECT clause so every provider read stays in sync with the
+    /// struct fields (migration 031 added `provider_kind`).
+    const COLS: &'static str =
+        "id, name, base_url, format, endpoint_path, enabled, upstream_user_agent, provider_kind";
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -140,11 +155,13 @@ pub struct ProviderManager;
 impl ProviderManager {
     pub async fn list() -> Result<Vec<Provider>, crate::error::ProxyError> {
         let pool = get_pool().await;
-        let db_providers: Vec<DbProvider> =
-            sqlx::query_as("SELECT id, name, base_url, format, endpoint_path, enabled, upstream_user_agent FROM providers ORDER BY name")
-                .fetch_all(pool)
-                .await
-                .map_err(|e| crate::error::ProxyError::Database(e))?;
+        let db_providers: Vec<DbProvider> = sqlx::query_as(&format!(
+            "SELECT {} FROM providers ORDER BY name",
+            DbProvider::COLS
+        ))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| crate::error::ProxyError::Database(e))?;
 
         let mut providers = Vec::new();
         for p in db_providers {
@@ -159,6 +176,7 @@ impl ProviderManager {
                 endpoint_path: p.endpoint_path,
                 enabled: p.enabled != 0,
                 upstream_user_agent: p.upstream_user_agent,
+                provider_kind: p.provider_kind,
                 models,
                 api_keys,
                 protocols,
@@ -170,9 +188,10 @@ impl ProviderManager {
     #[allow(dead_code)]
     pub async fn get_by_id(provider_id: &str) -> Result<Provider, crate::error::ProxyError> {
         let pool = get_pool().await;
-        let p: DbProvider = sqlx::query_as(
-            "SELECT id, name, base_url, format, endpoint_path, enabled, upstream_user_agent FROM providers WHERE id = ?",
-        )
+        let p: DbProvider = sqlx::query_as(&format!(
+            "SELECT {} FROM providers WHERE id = ?",
+            DbProvider::COLS
+        ))
         .bind(provider_id)
         .fetch_one(pool)
         .await
@@ -190,6 +209,7 @@ impl ProviderManager {
             endpoint_path: p.endpoint_path,
             enabled: p.enabled != 0,
             upstream_user_agent: p.upstream_user_agent,
+            provider_kind: p.provider_kind,
             models,
             api_keys,
             protocols,
@@ -297,9 +317,10 @@ impl ProviderManager {
         ))?;
 
         let pool = get_pool().await;
-        let provider: DbProvider = sqlx::query_as(
-            "SELECT id, name, base_url, format, endpoint_path, enabled, upstream_user_agent FROM providers WHERE id = ?",
-        )
+        let provider: DbProvider = sqlx::query_as(&format!(
+            "SELECT {} FROM providers WHERE id = ?",
+            DbProvider::COLS
+        ))
         .bind(&matched.provider_id)
         .fetch_one(pool)
         .await
@@ -342,6 +363,7 @@ impl ProviderManager {
             target_model,
             endpoint_path,
             upstream_user_agent: provider.upstream_user_agent,
+            provider_kind: provider.provider_kind,
             capabilities: matched.capabilities(),
             protocols,
         })
@@ -649,6 +671,7 @@ mod tests {
             target_model: "m".into(),
             endpoint_path: "/v1/chat/completions".into(),
             upstream_user_agent: String::new(),
+            provider_kind: crate::codex::PROVIDER_KIND_STANDARD.into(),
             capabilities: ModelCapabilities::permissive(),
             protocols,
         }

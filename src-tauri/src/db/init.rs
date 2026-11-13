@@ -481,6 +481,54 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 030: model supports_vision");
     }
 
+    // Migration 031: Codex OAuth channels — providers.provider_kind + the
+    // codex_accounts credential table (one account per provider). Idempotent
+    // via column/table existence checks for partial-application recovery.
+    let has_provider_kind: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('providers') WHERE name = 'provider_kind'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    if !has_provider_kind {
+        sqlx::query("ALTER TABLE providers ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'standard'")
+            .execute(pool)
+            .await?;
+        info!("Applied migration 031 (partial): providers.provider_kind");
+    }
+
+    let has_codex_accounts: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'codex_accounts'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    if !has_codex_accounts {
+        // Mirrors migrations/031_codex_accounts.sql's CREATE TABLE (the ALTER
+        // was ensured separately above).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS codex_accounts (
+                id TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL UNIQUE REFERENCES providers(id) ON DELETE CASCADE,
+                chatgpt_account_id TEXT,
+                email TEXT,
+                plan_type TEXT,
+                encrypted_access_token BLOB NOT NULL,
+                access_nonce BLOB NOT NULL,
+                encrypted_refresh_token BLOB NOT NULL,
+                refresh_nonce BLOB NOT NULL,
+                expires_at TEXT,
+                last_refresh_at TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT
+            )",
+        )
+        .execute(pool)
+        .await?;
+        info!("Applied migration 031: codex_accounts table");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

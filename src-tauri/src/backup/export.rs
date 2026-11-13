@@ -30,6 +30,9 @@ pub async fn export_bundle_with_passphrase(
     data.provider_protocols = read_table(pool, "provider_protocols", empty).await?;
     data.provider_models = read_table(pool, "provider_models", empty).await?;
     data.api_keys = read_table(pool, "api_keys", API_KEY_BLOB_COLS).await?;
+    data.codex_accounts = read_table(pool, "codex_accounts", CODEX_ACCOUNT_BLOB_COLS)
+        .await
+        .unwrap_or_else(|_| Vec::new());
     data.interceptor_rules = read_table(pool, "interceptor_rules", empty).await?;
     data.virtual_models = read_table(pool, "virtual_models", empty).await?;
     data.virtual_model_mappings = read_table(pool, "virtual_model_mappings", empty).await?;
@@ -49,6 +52,7 @@ pub async fn export_bundle_with_passphrase(
 
     // Re-encrypt sensitive fields with the passphrase key.
     encrypt_api_keys(&mut data.api_keys, &key)?;
+    encrypt_codex_accounts(&mut data.codex_accounts, &key)?;
     encrypt_sensitive_settings(&mut data.settings, &key)?;
     encrypt_mcp_secrets(&mut data.mcp_servers, &key)?;
 
@@ -64,6 +68,8 @@ pub async fn export_bundle_with_passphrase(
         },
         encrypted_fields: vec![
             "api_keys.encrypted_key".into(),
+            "codex_accounts.encrypted_access_token".into(),
+            "codex_accounts.encrypted_refresh_token".into(),
             "settings.proxy_auth_key".into(),
             "mcp_servers.env".into(),
             "mcp_servers.headers".into(),
@@ -138,8 +144,14 @@ fn row_to_json(row: &sqlx::sqlite::SqliteRow, blob_cols: &[&str]) -> serde_json:
 }
 
 /// Schema knowledge: which columns are BLOB per table (used for correct
-/// base64 round-tripping). Only api_keys has BLOB columns.
+/// base64 round-tripping). Only api_keys and codex_accounts have BLOB columns.
 const API_KEY_BLOB_COLS: &[&str] = &["encrypted_key", "nonce"];
+const CODEX_ACCOUNT_BLOB_COLS: &[&str] = &[
+    "encrypted_access_token",
+    "access_nonce",
+    "encrypted_refresh_token",
+    "refresh_nonce",
+];
 
 fn encrypt_api_keys(rows: &mut [serde_json::Value], key: &[u8; 32]) -> BackupResult<()> {
     for row in rows.iter_mut() {
@@ -173,6 +185,39 @@ fn encrypt_api_keys(rows: &mut [serde_json::Value], key: &[u8; 32]) -> BackupRes
 
         obj.insert("encrypted_key".into(), B64.encode(new_ct).into());
         obj.insert("nonce".into(), B64.encode(new_nonce).into());
+    }
+    Ok(())
+}
+
+/// Re-encrypt both token pairs of every codex_accounts row with the
+/// passphrase key (export direction).
+fn encrypt_codex_accounts(rows: &mut [serde_json::Value], key: &[u8; 32]) -> BackupResult<()> {
+    for row in rows.iter_mut() {
+        let obj = row.as_object_mut().ok_or(BackupError::InvalidFormat)?;
+        for (blob_col, nonce_col) in [
+            ("encrypted_access_token", "access_nonce"),
+            ("encrypted_refresh_token", "refresh_nonce"),
+        ] {
+            let enc_b64 = obj
+                .get(blob_col)
+                .and_then(|v| v.as_str())
+                .ok_or(BackupError::InvalidFormat)?;
+            let nonce_b64 = obj
+                .get(nonce_col)
+                .and_then(|v| v.as_str())
+                .ok_or(BackupError::InvalidFormat)?;
+            let enc_blob = B64.decode(enc_b64).map_err(|_| BackupError::InvalidFormat)?;
+            let nonce_blob = B64.decode(nonce_b64).map_err(|_| BackupError::InvalidFormat)?;
+            let nonce_arr: [u8; 12] = nonce_blob
+                .as_slice()
+                .try_into()
+                .map_err(|_| BackupError::InvalidFormat)?;
+            let plaintext = decrypt_api_key(&enc_blob, &nonce_arr)
+                .map_err(|e| BackupError::Other(e.to_string()))?;
+            let (new_ct, new_nonce) = passphrase_encrypt(plaintext.as_bytes(), key)?;
+            obj.insert(blob_col.into(), B64.encode(new_ct).into());
+            obj.insert(nonce_col.into(), B64.encode(new_nonce).into());
+        }
     }
     Ok(())
 }
