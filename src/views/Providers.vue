@@ -13,54 +13,65 @@
           v-for="p in providers"
           :key="p.id"
           class="provider-card"
-          :class="{ 'provider-card--disabled': !p.enabled }"
+          :class="{
+            'provider-card--disabled': !p.enabled,
+            'provider-card--codex': isCodexProvider(p),
+          }"
           :data-format="p.format"
         >
           <div class="provider-card-bar" />
           <div class="provider-card-header">
             <div class="provider-card-title">
-              <span class="provider-card-name">{{ p.name }}</span>
-              <n-tag
-                v-if="isCodexProvider(p)"
-                size="small"
-                type="success"
-                round
-              >
-                Codex 官方
-              </n-tag>
-              <n-tag
-                v-for="f in providerFormats(p)"
-                :key="f"
-                size="small"
-                :type="formatColorMap[f] || 'default'"
-                round
-              >
-                {{ f }}
-              </n-tag>
+              <span class="provider-card-name" :title="p.name">{{ p.name }}</span>
+              <div class="provider-card-badges">
+                <n-tag
+                  v-if="isCodexProvider(p)"
+                  size="small"
+                  type="success"
+                  round
+                >
+                  Codex 官方
+                </n-tag>
+                <n-tag
+                  v-for="f in providerFormats(p)"
+                  :key="f"
+                  size="small"
+                  :type="formatColorMap[f] || 'default'"
+                  round
+                >
+                  {{ f }}
+                </n-tag>
+              </div>
             </div>
             <n-switch :value="p.enabled" size="small" @update:value="(v: boolean) => handleToggle(p.id, v)" />
           </div>
 
-          <n-text depth="3" class="provider-card-url font-mono">{{ p.base_url }}</n-text>
+          <n-text depth="3" class="provider-card-url font-mono" :title="p.base_url">{{ p.base_url }}</n-text>
 
-          <div v-if="isCodexProvider(p)" class="codex-account-chip">
+          <div v-if="isCodexProvider(p)" class="codex-account-panel">
+            <div class="codex-panel-label">账号</div>
             <template v-if="p.codex_account && p.codex_account.status !== 'missing'">
-              <n-tag size="small" :bordered="false" :type="codexStatusType(p.codex_account.status)">
-                {{ codexStatusText(p.codex_account) }}
-              </n-tag>
-              <span class="codex-account-email">{{ p.codex_account.email || p.codex_account.chatgpt_account_id || '未知账号' }}</span>
-              <span v-if="p.codex_account.plan_type" class="codex-account-plan">{{ p.codex_account.plan_type }}</span>
-              <span v-if="p.codex_account.expires_at" class="codex-account-expiry">
+              <div class="codex-account-main">
+                <n-tag size="small" :bordered="false" :type="codexStatusType(p.codex_account.status)">
+                  {{ codexStatusText(p.codex_account) }}
+                </n-tag>
+                <span class="codex-account-email">{{ p.codex_account.email || p.codex_account.chatgpt_account_id || '未知账号' }}</span>
+                <span v-if="p.codex_account.plan_type" class="codex-account-plan">{{ p.codex_account.plan_type }}</span>
+              </div>
+              <div v-if="p.codex_account.expires_at" class="codex-account-expiry">
                 令牌到期 {{ formatExpiry(p.codex_account.expires_at) }}
-              </span>
+              </div>
             </template>
             <template v-else>
-              <n-tag size="small" :bordered="false" type="warning">未登录</n-tag>
-              <span class="codex-account-email">尚未绑定 Codex 账号，请点击「登录」</span>
+              <div class="codex-account-main">
+                <n-tag size="small" :bordered="false" type="warning">未登录</n-tag>
+                <span class="codex-account-email">尚未绑定 Codex 账号，请先登录</span>
+              </div>
             </template>
           </div>
 
           <div v-if="isCodexProvider(p) && p.codex_account?.status === 'active'" class="codex-usage">
+            <div class="codex-panel-label">额度</div>
             <div v-if="usageLoading[p.id] && !usageByProvider[p.id]" class="codex-usage-loading">额度加载中…</div>
             <n-text v-else-if="usageErrorByProvider[p.id]" depth="3" style="font-size: 12px">
               {{ usageErrorByProvider[p.id] }}
@@ -75,17 +86,17 @@
                 class="codex-usage-row"
               >
                 <div class="codex-usage-meta">
-                  <span>{{ w.label }}</span>
-                  <span>剩余 {{ formatPercent(w.remaining_percent) }}% · 已用 {{ formatPercent(w.used_percent) }}%</span>
+                  <span class="codex-usage-label">{{ w.label }}</span>
+                  <span class="codex-usage-pct">剩余 {{ formatPercent(w.remaining_percent) }}% · 已用 {{ formatPercent(w.used_percent) }}%</span>
                 </div>
                 <n-progress
                   type="line"
                   :percentage="Math.min(100, Math.max(0, Math.round(w.remaining_percent)))"
                   :status="usageProgressStatus(usageByProvider[p.id]!, w)"
                   :show-indicator="false"
-                  :height="6"
+                  :height="8"
                 />
-                <n-text depth="3" style="font-size: 11px" :title="w.reset_at ? formatExpiry(w.reset_at) : undefined">
+                <n-text depth="3" class="codex-usage-reset" :title="w.reset_at ? formatExpiry(w.reset_at) : undefined">
                   {{ formatResetText(w) }}
                 </n-text>
               </div>
@@ -93,60 +104,63 @@
           </div>
 
           <div class="provider-card-models">
-            <template v-if="p.models.length">
-              <n-tag
-                v-for="m in p.models"
-                :key="m.model_name"
-                size="small"
-                round
-                :bordered="false"
-                type="default"
-                class="provider-model-tag"
-              >
-                {{ m.model_name }}
-              </n-tag>
-            </template>
-            <n-text v-else depth="3" style="font-size: 12px">暂无模型</n-text>
+            <div class="codex-panel-label">模型</div>
+            <div class="provider-card-models-list">
+              <template v-if="p.models.length">
+                <n-tag
+                  v-for="m in p.models"
+                  :key="m.model_name"
+                  size="small"
+                  round
+                  :bordered="false"
+                  type="default"
+                  class="provider-model-tag"
+                >
+                  {{ m.model_name }}
+                </n-tag>
+              </template>
+              <n-text v-else depth="3" style="font-size: 12px">暂无模型</n-text>
+            </div>
           </div>
 
           <div class="provider-card-actions">
-            <n-button
-              v-if="isCodexProvider(p)"
-              quaternary
-              size="tiny"
-              type="success"
-              @click="beginCodexLogin(p.id)"
-            >
-              {{ p.codex_account && p.codex_account.status !== 'missing' ? '重新登录' : '登录' }}
-            </n-button>
-            <n-button
-              v-if="isCodexProvider(p)"
-              quaternary
-              size="tiny"
-              :loading="importingLocal && loginProviderId === p.id"
-              @click="handleImportLocalForProvider(p.id)"
-            >
-              导入本机登录
-            </n-button>
-            <n-button
-              v-if="isCodexProvider(p)"
-              quaternary
-              size="tiny"
-              type="warning"
-              :loading="refreshingToken === p.id"
-              @click="handleRefreshCodexToken(p.id)"
-            >
-              刷新令牌
-            </n-button>
-            <n-button
-              v-if="isCodexProvider(p) && p.codex_account?.status === 'active'"
-              quaternary
-              size="tiny"
-              :loading="usageLoading[p.id]"
-              @click="fetchCodexUsage(p.id, true)"
-            >
-              刷新额度
-            </n-button>
+            <template v-if="isCodexProvider(p)">
+              <n-button
+                size="tiny"
+                type="primary"
+                :disabled="p.codex_account?.status !== 'active'"
+                :loading="applyingLocal === p.id"
+                @click="confirmApplyLocal(p)"
+              >
+                应用
+              </n-button>
+              <n-button
+                quaternary
+                size="tiny"
+                type="success"
+                @click="beginCodexLogin(p.id)"
+              >
+                {{ p.codex_account && p.codex_account.status !== 'missing' ? '重新登录' : '登录' }}
+              </n-button>
+              <n-button
+                quaternary
+                size="tiny"
+                type="warning"
+                :loading="refreshingToken === p.id"
+                @click="handleRefreshCodexToken(p.id)"
+              >
+                刷新令牌
+              </n-button>
+              <n-button
+                v-if="p.codex_account?.status === 'active'"
+                quaternary
+                size="tiny"
+                :loading="usageLoading[p.id]"
+                @click="fetchCodexUsage(p.id, true)"
+              >
+                刷新额度
+              </n-button>
+            </template>
             <n-button quaternary size="tiny" type="info" @click="openTestModal(p)">
               测试
             </n-button>
@@ -197,8 +211,7 @@
           <n-form-item label="账号">
             <n-space vertical size="small" style="width: 100%">
               <n-alert type="info" :bordered="false">
-                创建后将自动打开浏览器进行 ChatGPT 授权登录（与官方 Codex CLI 相同的 OAuth 流程）。
-                也可以使用下方「导入本机登录」直接读取本机 codex CLI 的登录凭证。
+                创建后可登录 ChatGPT 授权（与官方 Codex CLI 相同的 OAuth 流程）；登录弹窗中也可导入本机 ~/.codex 凭证。
               </n-alert>
               <div v-if="isEditing && editingCodexAccount" class="codex-edit-account">
                 <n-tag size="small" :type="codexStatusType(editingCodexAccount.status)" :bordered="false">
@@ -479,6 +492,35 @@
     </n-modal>
 
     <n-modal
+      v-model:show="showApplyModal"
+      preset="dialog"
+      title="应用官方凭证到本机"
+      positive-text="确认替换"
+      negative-text="取消"
+      type="warning"
+      :loading="applyingLocal !== null"
+      :positive-button-props="{ type: 'warning' }"
+      @positive-click="handleApplyLocal"
+      style="width: 480px"
+    >
+      <n-space vertical size="small">
+        <n-text>
+          将供应商
+          <n-text strong>{{ applyTarget?.name }}</n-text>
+          的 Codex 官方凭证写入本机
+          <n-text code>~/.codex/auth.json</n-text>
+          。
+        </n-text>
+        <n-text depth="3" style="font-size: 13px">
+          替换前会备份原凭证；若本机 Codex 正使用代理/非官方模型，将一并切换为该供应商的官方模型。替换后请重启 Codex CLI / Desktop 生效。
+        </n-text>
+        <n-text v-if="applyTargetAccount" depth="3" style="font-size: 13px">
+          账号：{{ applyTargetAccount }}
+        </n-text>
+      </n-space>
+    </n-modal>
+
+    <n-modal
       v-model:show="showLoginModal"
       preset="card"
       title="Codex 账号登录"
@@ -491,9 +533,18 @@
           <n-spin size="large" />
           <n-text>正在等待浏览器授权完成…</n-text>
           <n-text depth="3" style="font-size: 12px; text-align: center">
-            若浏览器未自动打开，请点击下方链接手动完成登录：
+            请点击下方链接在浏览器中完成登录，或复制链接后手动打开：
           </n-text>
-          <a :href="loginUrl" target="_blank" rel="noopener" class="codex-login-url">{{ loginUrl }}</a>
+          <div class="codex-login-url-box">
+            <a
+              :href="loginUrl"
+              target="_blank"
+              rel="noopener"
+              class="codex-login-url"
+              :title="loginUrl"
+            >{{ loginUrl }}</a>
+            <n-button size="tiny" secondary @click="copyLoginUrl">复制</n-button>
+          </div>
         </template>
         <template v-else-if="loginStatusState === 'completed'">
           <n-result status="success" title="登录成功">
@@ -793,6 +844,64 @@ async function fetchAllCodexUsage() {
   await Promise.all(ids.map((id) => fetchCodexUsage(id, false)))
 }
 
+// ---- Apply Codex credentials to local ~/.codex ----
+const showApplyModal = ref(false)
+const applyTarget = ref<Provider | null>(null)
+const applyingLocal = ref<string | null>(null)
+
+const applyTargetAccount = computed(() => {
+  const acc = applyTarget.value?.codex_account
+  if (!acc || acc.status === 'missing') return ''
+  const who = acc.email || acc.chatgpt_account_id || '未知账号'
+  return acc.plan_type ? `${who}（${acc.plan_type}）` : who
+})
+
+function confirmApplyLocal(p: Provider) {
+  if (p.codex_account?.status !== 'active') {
+    message.warning('请先登录 Codex 官方账号后再应用')
+    return
+  }
+  applyTarget.value = p
+  showApplyModal.value = true
+}
+
+interface ApplyLocalResult {
+  auth_path: string
+  auth_backed_up: boolean
+  config_switched_to_official: boolean
+  model: string | null
+}
+
+async function handleApplyLocal() {
+  const p = applyTarget.value
+  if (!p) return false
+  applyingLocal.value = p.id
+  try {
+    const result = await api<ApplyLocalResult>(`/api/codex/accounts/${p.id}/apply-local`, {
+      method: 'POST',
+    })
+    const parts: string[] = []
+    parts.push(result.auth_backed_up ? '已备份并替换本机 auth.json' : '已写入本机 auth.json')
+    if (result.config_switched_to_official) {
+      parts.push(
+        result.model
+          ? `已将 Codex 配置切换为官方模型 ${result.model}`
+          : '已将 Codex 配置切换为官方供应商',
+      )
+    }
+    parts.push('请重启 Codex CLI / Desktop 后生效')
+    message.success(parts.join('；'))
+    showApplyModal.value = false
+    applyTarget.value = null
+  } catch (err) {
+    message.error(`应用失败: ${err}`)
+    return false
+  } finally {
+    applyingLocal.value = null
+  }
+  return true
+}
+
 // ---- Codex OAuth login flow ----
 const showLoginModal = ref(false)
 const loginStatusState = ref<'idle' | 'pending' | 'completed' | 'failed'>('idle')
@@ -861,6 +970,19 @@ function accountFromStatusPayload(s: Record<string, unknown>): CodexAccountSumma
     return s as unknown as CodexAccountSummary
   }
   return null
+}
+
+async function copyLoginUrl() {
+  if (!loginUrl.value) {
+    message.warning('暂无登录链接')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(loginUrl.value)
+    message.success('已复制登录链接')
+  } catch {
+    message.error('复制失败，请手动选中链接复制')
+  }
 }
 
 /** Kick off (or restart) the browser OAuth flow for a provider and poll the
@@ -951,12 +1073,6 @@ async function handleImportLocalLogin() {
   } finally {
     importingLocal.value = false
   }
-}
-
-/** Card-level import: no need to open the browser-OAuth modal first. */
-async function handleImportLocalForProvider(providerId: string) {
-  loginProviderId.value = providerId
-  await handleImportLocalLogin()
 }
 
 async function handleRefreshCodexToken(providerId: string) {
@@ -1452,7 +1568,7 @@ onMounted(fetchProviders)
 
 .provider-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 16px;
 }
 
@@ -1460,13 +1576,19 @@ onMounted(fetchProviders)
   position: relative;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px;
+  border-radius: 12px;
+  padding: 16px 16px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   transition: box-shadow 0.2s, transform 0.15s;
   overflow: hidden;
+  min-width: 0;
+}
+
+.provider-card--codex {
+  gap: 14px;
+  padding-bottom: 12px;
 }
 
 .provider-card:hover {
@@ -1503,36 +1625,53 @@ onMounted(fetchProviders)
 .provider-card-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .provider-card-title {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   min-width: 0;
+  flex: 1;
+}
+
+.provider-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .provider-card-name {
   font-weight: 600;
-  font-size: 15px;
+  font-size: 16px;
   color: var(--text-1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.3;
+  word-break: break-word;
 }
 
 .provider-card-url {
   font-size: 12px;
   word-break: break-all;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .provider-card-models {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.provider-card-models-list {
+  display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  min-height: 24px;
+  gap: 6px;
+  max-height: 88px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .provider-model-tag {
@@ -1542,20 +1681,31 @@ onMounted(fetchProviders)
 
 .provider-card-actions {
   display: flex;
-  gap: 2px;
-  padding-top: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding-top: 10px;
   border-top: 1px solid var(--border);
   margin-top: auto;
+}
+
+.codex-panel-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  text-transform: none;
 }
 
 /* Codex usage quota block on provider cards */
 .codex-usage {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
+  background: var(--bg-sunken, transparent);
 }
 
 .codex-usage-loading {
@@ -1566,47 +1716,73 @@ onMounted(fetchProviders)
 .codex-usage-row {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 
 .codex-usage-meta {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  gap: 10px;
   font-size: 12px;
   color: var(--text-2);
 }
 
-/* Codex account chip on provider cards */
-.codex-account-chip {
+.codex-usage-label {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.codex-usage-pct {
+  text-align: right;
+  line-height: 1.35;
+}
+
+.codex-usage-reset {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* Codex account panel on provider cards */
+.codex-account-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.codex-account-main {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-2);
-  padding: 6px 8px;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
+  gap: 8px;
 }
 
 .codex-account-email {
   font-weight: 500;
+  font-size: 13px;
+  color: var(--text-1);
   word-break: break-all;
+  line-height: 1.4;
 }
 
 .codex-account-plan {
   font-size: 11px;
-  padding: 1px 8px;
+  padding: 2px 8px;
   border-radius: 999px;
   background: rgba(99, 102, 241, 0.15);
   color: #818cf8;
+  flex-shrink: 0;
 }
 
 .codex-account-expiry {
   font-size: 11px;
   color: var(--text-3);
+  line-height: 1.4;
 }
 
 .codex-edit-account {
@@ -1616,10 +1792,26 @@ onMounted(fetchProviders)
   font-size: 13px;
 }
 
+.codex-login-url-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-sunken, transparent);
+  box-sizing: border-box;
+}
+
 .codex-login-url {
+  flex: 1;
+  min-width: 0;
   font-size: 12px;
+  line-height: 1.45;
   word-break: break-all;
   color: var(--accent, #4b9eff);
+  text-align: left;
 }
 
 .protocol-list {

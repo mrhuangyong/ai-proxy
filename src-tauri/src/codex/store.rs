@@ -309,6 +309,16 @@ fn summary_of(row: &CodexAccountRow) -> CodexAccountSummary {
 }
 
 pub async fn list_summaries() -> Result<Vec<CodexAccountSummary>, ProxyError> {
+    Ok(list_account_rows()
+        .await?
+        .into_iter()
+        .map(|r| summary_of(&r))
+        .collect())
+}
+
+/// All Codex account rows (tokens still encrypted). Used by the background
+/// refresh scheduler.
+pub async fn list_account_rows() -> Result<Vec<CodexAccountRow>, ProxyError> {
     let pool = crate::db::get_pool().await;
     let query = format!(
         "SELECT {} FROM codex_accounts ORDER BY created_at ASC",
@@ -318,7 +328,7 @@ pub async fn list_summaries() -> Result<Vec<CodexAccountSummary>, ProxyError> {
         .fetch_all(pool)
         .await
         .map_err(|e| ProxyError::Database(e))?;
-    Ok(rows.into_iter().map(|r| summary_of(&row_to_account(r))).collect())
+    Ok(rows.into_iter().map(row_to_account).collect())
 }
 
 /// Per-provider refresh locks: concurrent requests hitting an expiring token

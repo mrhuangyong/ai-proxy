@@ -418,6 +418,119 @@ pub async fn write_codex_official_auth(tokens: &OfficialAuthTokens) -> Result<()
     Ok(())
 }
 
+/// Result of applying a Codex OAuth account to the local `~/.codex` install.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ApplyLocalResult {
+    pub auth_path: String,
+    pub auth_backed_up: bool,
+    pub config_switched_to_official: bool,
+    pub model: Option<String>,
+}
+
+fn is_proxy_model_provider(config: &HashMap<String, toml::Value>) -> bool {
+    matches!(
+        config.get("model_provider").and_then(|v| v.as_str()),
+        Some("ai-proxy")
+    )
+}
+
+fn current_codex_model(config: &HashMap<String, toml::Value>) -> Option<String> {
+    config
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Apply stored OAuth tokens to local Codex: backup+write `auth.json`, and if
+/// `config.toml` still points at the proxy / a non-official model, switch it to
+/// the official ChatGPT provider + one of `official_models`.
+pub async fn apply_official_credentials_to_local(
+    tokens: &OfficialAuthTokens,
+    official_models: &[String],
+) -> Result<ApplyLocalResult, String> {
+    let auth_path = codex_auth_path();
+    let auth_existed = auth_path.exists();
+    write_codex_official_auth(tokens).await?;
+
+    let config_path = codex_config_path();
+    let mut config: HashMap<String, toml::Value> = if config_path.exists() {
+        let content = tokio::fs::read_to_string(&config_path)
+            .await
+            .map_err(|e| format!("Failed to read codex config: {}", e))?;
+        toml::from_str(&content).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
+    let using_proxy = is_proxy_model_provider(&config);
+    let current_model = current_codex_model(&config);
+    let model_is_official = match (&current_model, official_models) {
+        (_, []) => true, // nothing to compare against — leave model alone
+        (None, _) => true,
+        (Some(m), list) => list.iter().any(|o| o.eq_ignore_ascii_case(m)),
+    };
+
+    let mut config_switched = false;
+    let mut chosen_model = current_model.clone();
+
+    if using_proxy || !model_is_official {
+        config_switched = true;
+        // Drop proxy routing so Codex talks to ChatGPT with the official login.
+        config.remove("model_provider");
+        config.remove("model_catalog_json");
+        if let Some(toml::Value::Table(providers)) = config.get_mut("model_providers") {
+            providers.remove("ai-proxy");
+            if providers.is_empty() {
+                config.remove("model_providers");
+            }
+        } else {
+            config.remove("model_providers");
+        }
+
+        if !model_is_official {
+            if let Some(first) = official_models.first() {
+                config.insert(
+                    "model".to_string(),
+                    toml::Value::String(first.clone()),
+                );
+                chosen_model = Some(first.clone());
+            } else {
+                config.remove("model");
+                chosen_model = None;
+            }
+        }
+
+        let content = toml::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        if let Some(parent) = config_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create config directory: {}", e))?;
+        }
+        if let Ok(old) = tokio::fs::read_to_string(&config_path).await {
+            if old != content {
+                let bak = config_path.with_extension("toml.aiproxy.bak");
+                if let Err(e) = tokio::fs::write(&bak, &old).await {
+                    tracing::warn!("Failed to back up codex config to {:?}: {}", bak, e);
+                }
+            }
+        }
+        atomic_write(&config_path, &content).await?;
+        tracing::info!(
+            "Switched local Codex config to official provider (model={:?})",
+            chosen_model
+        );
+    }
+
+    Ok(ApplyLocalResult {
+        auth_path: auth_path.to_string_lossy().to_string(),
+        auth_backed_up: auth_existed,
+        config_switched_to_official: config_switched,
+        model: chosen_model,
+    })
+}
+
 pub async fn write_claude_cli_config(
     model: &str,
     model_haiku: Option<&str>,
@@ -1273,5 +1386,21 @@ mod catalog_tests {
         let doc = build_official_auth_json(&tokens);
         assert_eq!(doc["tokens"]["account_id"], "");
         assert!(doc["last_refresh"].as_str().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn proxy_model_provider_detection() {
+        let mut cfg = HashMap::new();
+        assert!(!is_proxy_model_provider(&cfg));
+        cfg.insert(
+            "model_provider".into(),
+            toml::Value::String("ai-proxy".into()),
+        );
+        assert!(is_proxy_model_provider(&cfg));
+        cfg.insert(
+            "model_provider".into(),
+            toml::Value::String("openai".into()),
+        );
+        assert!(!is_proxy_model_provider(&cfg));
     }
 }

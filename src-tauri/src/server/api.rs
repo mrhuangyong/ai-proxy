@@ -2674,6 +2674,48 @@ async fn codex_account_delete(
     Ok(ok(()))
 }
 
+/// Apply a Codex OAuth account's tokens onto the local `~/.codex` install
+/// (backup + overwrite auth.json; switch config.toml off ai-proxy when needed).
+#[cfg(feature = "desktop")]
+async fn codex_account_apply_local(
+    Path(provider_id): Path<String>,
+) -> Result<Json<ApiResponse<crate::apps::config::ApplyLocalResult>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT COALESCE(provider_kind, 'standard') FROM providers WHERE id = ?")
+            .bind(&provider_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| err_json(e.to_string()))?;
+    match kind.as_deref() {
+        None => return Err(err_json("供应商不存在")),
+        Some(k) if k != crate::codex::PROVIDER_KIND_CODEX => {
+            return Err(err_json("该供应商不是 Codex 官方渠道"));
+        }
+        _ => {}
+    }
+
+    let tokens = crate::codex::store::tokens_for_auth_json(&provider_id)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+
+    let official_models: Vec<String> = sqlx::query_scalar(
+        "SELECT model_name FROM provider_models \
+         WHERE provider_id = ? AND enabled = 1 \
+         ORDER BY model_name COLLATE NOCASE",
+    )
+    .bind(&provider_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| err_json(e.to_string()))?;
+
+    let result =
+        crate::apps::config::apply_official_credentials_to_local(&tokens, &official_models)
+            .await
+            .map_err(err_json)?;
+    Ok(ok(result))
+}
+
 // --- Route registration ---
 
 pub fn api_routes() -> axum::Router {
@@ -2790,7 +2832,7 @@ pub fn api_routes() -> axum::Router {
             axum::routing::delete(codex_account_delete),
         );
 
-    // Desktop mode: app launcher routes
+    // Desktop mode: app launcher routes + apply Codex credentials to local machine
     #[cfg(feature = "desktop")]
     {
         router = router
@@ -2799,6 +2841,10 @@ pub fn api_routes() -> axum::Router {
             .route(
                 "/apps/:app_type/path",
                 axum::routing::put(handlers::set_app_path),
+            )
+            .route(
+                "/codex/accounts/:provider_id/apply-local",
+                axum::routing::post(codex_account_apply_local),
             );
     }
 

@@ -182,13 +182,8 @@ pub async fn start_login(provider_id: &str) -> Result<(String, String), ProxyErr
         SESSIONS.lock().await.remove(&login_id_for_server);
     });
 
-    // Best-effort browser open; the frontend also shows the URL as a manual
-    // fallback (and for headless/server deployments).
-    let opened = open_in_browser(&authorize_url);
-    if !opened {
-        tracing::info!("[codex] could not spawn a browser; user must open the authorize URL manually");
-    }
-
+    // Do not auto-open the browser — the frontend shows the authorize URL
+    // for the user to open/copy explicitly.
     Ok((login_id, authorize_url))
 }
 
@@ -359,36 +354,6 @@ pub async fn import_from_local_auth(provider_id: &str) -> Result<CodexAccountSum
         None,
     )
     .await
-}
-
-/// Best-effort system-browser open (mirrors the apps launcher approach).
-fn open_in_browser(url: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .is_ok()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    {
-        let _ = url;
-        false
-    }
 }
 
 fn login_success_html(email: &str, plan: &str) -> String {
