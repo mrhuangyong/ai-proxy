@@ -235,9 +235,9 @@ pub async fn launch_app(
             ))
         })?;
 
-    // Get proxy base URL from settings
+    // Get proxy base URL + codex auth prefs from settings
     let proxy_settings: Vec<(String, String)> = sqlx::query_as(
-        "SELECT key, value FROM settings WHERE key IN ('http_port', 'codex_preserve_auth')",
+        "SELECT key, value FROM settings WHERE key IN ('http_port', 'codex_preserve_auth', 'codex_auth_mode', 'codex_inject_provider_id')",
     )
     .fetch_all(pool)
     .await
@@ -248,11 +248,40 @@ pub async fn launch_app(
         .get("http_port")
         .cloned()
         .unwrap_or_else(|| crate::server::default_http_port().to_string());
-    let preserve_auth = settings_map
-        .get("codex_preserve_auth")
-        .map(|v| v == "true")
-        .unwrap_or(false);
     let proxy_base = format!("http://127.0.0.1:{}", port);
+
+    // Resolve Codex auth mode: request body → settings.codex_auth_mode →
+    // legacy codex_preserve_auth → apikey.
+    let auth_mode = if app_type.is_codex() {
+        body.codex_auth_mode
+            .as_deref()
+            .and_then(crate::apps::types::CodexAuthMode::from_str)
+            .or_else(|| {
+                settings_map
+                    .get("codex_auth_mode")
+                    .and_then(|v| crate::apps::types::CodexAuthMode::from_str(v))
+            })
+            .unwrap_or_else(|| {
+                let preserve = settings_map
+                    .get("codex_preserve_auth")
+                    .map(|v| v == "true")
+                    .unwrap_or(false);
+                crate::apps::types::CodexAuthMode::from_preserve_flag(preserve)
+            })
+    } else {
+        crate::apps::types::CodexAuthMode::Apikey
+    };
+    let inject_provider_id = body
+        .codex_account_provider_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            settings_map
+                .get("codex_inject_provider_id")
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+        })
+        .map(|s| s.to_string());
 
     // Refuse to overwrite downstream app configs if the proxy isn't actually
     // listening on the target port — otherwise we'd strand the app pointing
@@ -365,6 +394,55 @@ pub async fn launch_app(
         ))
     })?;
 
+    // Persist Codex auth preference for the next launch dialog open.
+    if app_type.is_codex() {
+        let _ = sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind("codex_auth_mode")
+        .bind(auth_mode.as_str())
+        .execute(pool)
+        .await;
+        let _ = sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind("codex_preserve_auth")
+        .bind(if auth_mode == crate::apps::types::CodexAuthMode::Preserve {
+            "true"
+        } else {
+            "false"
+        })
+        .execute(pool)
+        .await;
+        if let Some(ref pid) = inject_provider_id {
+            let _ = sqlx::query(
+                "INSERT INTO settings (key, value) VALUES (?, ?) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind("codex_inject_provider_id")
+            .bind(pid)
+            .execute(pool)
+            .await;
+        }
+    }
+
+    let official_tokens = if app_type.is_codex()
+        && auth_mode == crate::apps::types::CodexAuthMode::Inject
+    {
+        let pid = inject_provider_id.as_deref().ok_or_else(|| {
+            err_json("注入官方凭证需要选择已登录的 Codex 供应商账号".to_string())
+        })?;
+        Some(
+            crate::codex::store::tokens_for_auth_json(pid)
+                .await
+                .map_err(|e| err_json(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+
     let write_result = if app_type == AppType::OpenCodeCli {
         let models = body.models.as_deref().unwrap_or(&[]);
         config::write_opencode_config(models, &proxy_url, &api_key).await
@@ -406,7 +484,8 @@ pub async fn launch_app(
             model_opus,
             &proxy_url,
             &api_key,
-            preserve_auth,
+            auth_mode,
+            official_tokens.as_ref(),
             context_window,
             body.visible_models.as_deref(),
             &context_windows,
@@ -667,6 +746,8 @@ mod model_config_tests {
             models: None,
             visible_models: visible,
             work_dir: None,
+            codex_auth_mode: None,
+            codex_account_provider_id: None,
         }
     }
 

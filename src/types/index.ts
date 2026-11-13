@@ -202,6 +202,9 @@ export interface AppConfig {
   status: 'success' | 'config_error' | 'launch_error' | null
 }
 
+/** How Codex launch treats ~/.codex/auth.json. */
+export type CodexAuthMode = 'apikey' | 'preserve' | 'inject'
+
 export interface LaunchRequest {
   app_type: AppType
   model: string
@@ -212,6 +215,10 @@ export interface LaunchRequest {
   /** codex only: see AppConfig.visible_models. */
   visible_models?: string[]
   work_dir?: string
+  /** codex only: apikey | preserve | inject. */
+  codex_auth_mode?: CodexAuthMode
+  /** codex only: provider_id of the Codex OAuth account to inject. */
+  codex_account_provider_id?: string
 }
 
 export interface SetPathRequest {

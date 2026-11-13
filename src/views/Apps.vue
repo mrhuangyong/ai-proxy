@@ -135,12 +135,43 @@
         </template>
 
         <template v-if="isCodexApp(launchForm.appType)">
-          <n-space justify="space-between" align="center">
-            <n-space vertical size="small">
-              <n-text depth="3" style="font-size: 13px">保留官方登录</n-text>
-              <n-text depth="3" style="font-size: 12px">启用后仅修改 config.toml，不覆盖 auth.json，保留手机远程和官方插件</n-text>
-            </n-space>
-            <n-switch v-model:value="launchForm.preserveAuth" />
+          <n-space vertical size="small" style="width: 100%">
+            <n-text depth="3" style="font-size: 13px">登录凭证</n-text>
+            <n-radio-group v-model:value="launchForm.authMode" name="codex-auth-mode">
+              <n-space vertical size="small">
+                <n-radio value="apikey">代理 API Key（覆盖 auth.json）</n-radio>
+                <n-radio value="preserve">保留本机登录（不改 auth.json）</n-radio>
+                <n-radio value="inject" :disabled="!codexAccountOptions.length">
+                  注入官方账号
+                </n-radio>
+              </n-space>
+            </n-radio-group>
+            <n-text depth="3" style="font-size: 12px">
+              <template v-if="launchForm.authMode === 'inject'">
+                将供应商管理中已登录的 Codex 官方凭证写入 auth.json，保留手机远程和官方插件
+              </template>
+              <template v-else-if="launchForm.authMode === 'preserve'">
+                仅修改 config.toml，不覆盖 auth.json
+              </template>
+              <template v-else>
+                写入代理 API Key 到 auth.json（会清除本机 ChatGPT tokens）
+              </template>
+            </n-text>
+            <template v-if="launchForm.authMode === 'inject'">
+              <n-select
+                v-model:value="launchForm.injectProviderId"
+                :options="codexAccountOptions"
+                placeholder="选择要注入的 Codex 官方账号"
+                filterable
+              />
+            </template>
+            <n-text
+              v-else-if="!codexAccountOptions.length"
+              depth="3"
+              style="font-size: 12px"
+            >
+              暂无已登录账号：请先在供应商管理登录 Codex 官方账号后再注入
+            </n-text>
           </n-space>
         </template>
 
@@ -235,7 +266,7 @@ import { SettingsOutline } from '@vicons/ionicons5'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
 import { formatDateTime } from '../utils/format'
-import type { AppConfig, AppType, Provider, ProviderModel, VirtualModel } from '../types'
+import type { AppConfig, AppType, CodexAuthMode, Provider, ProviderModel, VirtualModel } from '../types'
 
 const message = useMessage()
 const router = useRouter()
@@ -255,7 +286,8 @@ const launchForm = ref({
   model_sonnet: null as string | null,
   model_opus: null as string | null,
   work_dir: '',
-  preserveAuth: false,
+  authMode: 'apikey' as CodexAuthMode,
+  injectProviderId: null as string | null,
   models: [] as string[],
   visibleModels: [] as string[],
 })
@@ -337,6 +369,26 @@ const modelOptionsWithEmpty = computed(() => {
   return modelOptions.value
 })
 
+/** Logged-in Codex OAuth accounts available for inject mode. */
+const codexAccountOptions = computed(() => {
+  return allProviders.value
+    .filter(
+      (p) =>
+        p.provider_kind === 'codex_oauth' &&
+        p.codex_account &&
+        p.codex_account.status === 'active',
+    )
+    .map((p) => {
+      const acc = p.codex_account!
+      const who = acc.email || acc.chatgpt_account_id || '未知账号'
+      const plan = acc.plan_type ? ` · ${acc.plan_type}` : ''
+      return {
+        label: `${p.name}: ${who}${plan}`,
+        value: p.id,
+      }
+    })
+})
+
 async function fetchApps() {
   loading.value = true
   try {
@@ -400,15 +452,35 @@ async function openLaunchModal(app: AppConfig) {
     model_sonnet: app.model_sonnet || null,
     model_opus: app.model_opus || null,
     work_dir: app.work_dir || '',
-    preserveAuth: false,
+    authMode: 'apikey',
+    injectProviderId: null,
     models: app.opencode_models || [],
     visibleModels: app.visible_models || [],
   }
 
   if (isCodexApp(app.app_type)) {
     try {
-      const s = await api<{ codex_preserve_auth?: string }>('/api/settings')
-      launchForm.value.preserveAuth = s.codex_preserve_auth === 'true'
+      const s = await api<{
+        codex_auth_mode?: string
+        codex_preserve_auth?: string
+        codex_inject_provider_id?: string
+      }>('/api/settings')
+      const mode = s.codex_auth_mode
+      if (mode === 'apikey' || mode === 'preserve' || mode === 'inject') {
+        launchForm.value.authMode = mode
+      } else if (s.codex_preserve_auth === 'true') {
+        launchForm.value.authMode = 'preserve'
+      }
+      const savedPid = s.codex_inject_provider_id || ''
+      if (savedPid && codexAccountOptions.value.some((o) => o.value === savedPid)) {
+        launchForm.value.injectProviderId = savedPid
+      } else if (codexAccountOptions.value.length === 1) {
+        launchForm.value.injectProviderId = codexAccountOptions.value[0].value
+      }
+      // Inject selected but no accounts available → fall back to preserve.
+      if (launchForm.value.authMode === 'inject' && !codexAccountOptions.value.length) {
+        launchForm.value.authMode = 'preserve'
+      }
     } catch {
       // ignore
     }
@@ -427,14 +499,22 @@ async function handleLaunch() {
     return false
   }
 
+  if (isCodexApp(launchForm.value.appType) && launchForm.value.authMode === 'inject') {
+    if (!launchForm.value.injectProviderId) {
+      message.warning('请选择要注入的 Codex 官方账号')
+      return false
+    }
+  }
+
   launchLoading.value = true
   try {
-    // Save codex_preserve_auth setting before launching
     if (isCodexApp(launchForm.value.appType)) {
       await api<void>('/api/settings', {
         method: 'PUT',
         body: JSON.stringify({
-          codex_preserve_auth: launchForm.value.preserveAuth ? 'true' : 'false',
+          codex_auth_mode: launchForm.value.authMode,
+          codex_preserve_auth: launchForm.value.authMode === 'preserve' ? 'true' : 'false',
+          codex_inject_provider_id: launchForm.value.injectProviderId || '',
         }),
       })
     }
@@ -464,6 +544,10 @@ async function handleLaunch() {
     if (isCodexApp(launchForm.value.appType)) {
       // 空数组也要提交：表示清空目录限制，后端会删除 model_catalog_json。
       body.visible_models = launchForm.value.visibleModels
+      body.codex_auth_mode = launchForm.value.authMode
+      if (launchForm.value.authMode === 'inject' && launchForm.value.injectProviderId) {
+        body.codex_account_provider_id = launchForm.value.injectProviderId
+      }
     }
 
     await api<void>('/api/apps/launch', {

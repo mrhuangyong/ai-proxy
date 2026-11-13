@@ -253,9 +253,10 @@ async fn codex_channel_end_to_end() {
     );
 
     // The refresh grant hit the mock IdP (expect(1) above enforces the count).
-    // Persisted credentials must be rotated in the DB.
-    let row: (Vec<u8>, Vec<u8>, String) = sqlx::query_as(
-        "SELECT encrypted_access_token, access_nonce, expires_at FROM codex_accounts WHERE provider_id = 'codex2'",
+    // Persisted credentials must be rotated in the DB (incl. id_token for auth.json inject).
+    let row: (Vec<u8>, Vec<u8>, String, Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT encrypted_access_token, access_nonce, expires_at, encrypted_id_token, id_nonce \
+         FROM codex_accounts WHERE provider_id = 'codex2'",
     )
     .fetch_one(&pool)
     .await
@@ -265,6 +266,12 @@ async fn codex_channel_end_to_end() {
     let stored_access = decrypt_api_key(&row.0, &nonce).unwrap();
     assert_eq!(stored_access, "refreshed-access-token");
     assert_eq!(row.2, new_exp.to_string());
+    let enc_id = row.3.expect("id_token must be persisted after refresh");
+    let id_nonce_bytes = row.4.expect("id_nonce must be persisted after refresh");
+    let mut id_nonce = [0u8; 12];
+    id_nonce.copy_from_slice(&id_nonce_bytes);
+    let stored_id = decrypt_api_key(&enc_id, &id_nonce).unwrap();
+    assert_eq!(stored_id, new_id_token);
 
     // ── Scenario 3: permanent refresh failure → account marked expired ────
     Mock::given(method("POST"))

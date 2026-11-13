@@ -29,10 +29,23 @@ pub struct CodexAccountRow {
     pub access_nonce: Vec<u8>,
     pub encrypted_refresh_token: Vec<u8>,
     pub refresh_nonce: Vec<u8>,
+    /// Present after migration 032; missing on legacy rows until next refresh/login.
+    pub encrypted_id_token: Option<Vec<u8>>,
+    pub id_nonce: Option<Vec<u8>>,
     /// RFC3339 unix timestamp of the access token's expiry (from id_token exp).
     pub expires_at: Option<i64>,
     pub last_refresh_at: Option<String>,
     pub status: String,
+}
+
+/// Plaintext token set for writing an official `~/.codex/auth.json`.
+#[derive(Debug, Clone)]
+pub struct OfficialAuthTokens {
+    pub id_token: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub account_id: Option<String>,
+    pub last_refresh_at: Option<String>,
 }
 
 /// Frontend-safe projection (never carries tokens).
@@ -62,6 +75,8 @@ fn row_to_account(row: sqlx::sqlite::SqliteRow) -> CodexAccountRow {
         access_nonce: row.get("access_nonce"),
         encrypted_refresh_token: row.get("encrypted_refresh_token"),
         refresh_nonce: row.get("refresh_nonce"),
+        encrypted_id_token: row.get("encrypted_id_token"),
+        id_nonce: row.get("id_nonce"),
         expires_at: expires_at.and_then(|s| s.parse::<i64>().ok()),
         last_refresh_at: row.get("last_refresh_at"),
         status: row.get("status"),
@@ -70,6 +85,7 @@ fn row_to_account(row: sqlx::sqlite::SqliteRow) -> CodexAccountRow {
 
 const SELECT_COLUMNS: &str = "id, provider_id, chatgpt_account_id, email, plan_type, \
      encrypted_access_token, access_nonce, encrypted_refresh_token, refresh_nonce, \
+     encrypted_id_token, id_nonce, \
      expires_at, last_refresh_at, status";
 
 pub async fn get_by_provider(provider_id: &str) -> Result<Option<CodexAccountRow>, ProxyError> {
@@ -149,6 +165,8 @@ pub async fn upsert_tokens(
         .map_err(|e| ProxyError::KeyManagement(format!("access token 加密失败: {}", e)))?;
     let (enc_refresh, refresh_nonce) = encrypt_api_key(&tokens.refresh_token)
         .map_err(|e| ProxyError::KeyManagement(format!("refresh token 加密失败: {}", e)))?;
+    let (enc_id, id_nonce) = encrypt_api_key(&tokens.id_token)
+        .map_err(|e| ProxyError::KeyManagement(format!("id token 加密失败: {}", e)))?;
     let now_rfc3339 = chrono::Utc::now().to_rfc3339();
 
     let pool = crate::db::get_pool().await;
@@ -156,8 +174,9 @@ pub async fn upsert_tokens(
         "INSERT INTO codex_accounts \
          (id, provider_id, chatgpt_account_id, email, plan_type, \
           encrypted_access_token, access_nonce, encrypted_refresh_token, refresh_nonce, \
+          encrypted_id_token, id_nonce, \
           expires_at, last_refresh_at, status, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) \
          ON CONFLICT(provider_id) DO UPDATE SET \
           chatgpt_account_id = excluded.chatgpt_account_id, \
           email = excluded.email, \
@@ -166,6 +185,8 @@ pub async fn upsert_tokens(
           access_nonce = excluded.access_nonce, \
           encrypted_refresh_token = excluded.encrypted_refresh_token, \
           refresh_nonce = excluded.refresh_nonce, \
+          encrypted_id_token = excluded.encrypted_id_token, \
+          id_nonce = excluded.id_nonce, \
           expires_at = excluded.expires_at, \
           last_refresh_at = excluded.last_refresh_at, \
           status = 'active', \
@@ -180,6 +201,8 @@ pub async fn upsert_tokens(
     .bind(&access_nonce.as_slice())
     .bind(&enc_refresh)
     .bind(&refresh_nonce.as_slice())
+    .bind(&enc_id)
+    .bind(&id_nonce.as_slice())
     .bind(expires_at.map(|v| v.to_string()))
     .bind(&now_rfc3339)
     .bind(&now_rfc3339)
@@ -204,6 +227,8 @@ async fn update_tokens(
         .map_err(|e| ProxyError::KeyManagement(format!("access token 加密失败: {}", e)))?;
     let (enc_refresh, refresh_nonce) = encrypt_api_key(&tokens.refresh_token)
         .map_err(|e| ProxyError::KeyManagement(format!("refresh token 加密失败: {}", e)))?;
+    let (enc_id, id_nonce) = encrypt_api_key(&tokens.id_token)
+        .map_err(|e| ProxyError::KeyManagement(format!("id token 加密失败: {}", e)))?;
 
     let pool = crate::db::get_pool().await;
     sqlx::query(
@@ -213,6 +238,7 @@ async fn update_tokens(
           plan_type = COALESCE(?, plan_type), \
           encrypted_access_token = ?, access_nonce = ?, \
           encrypted_refresh_token = ?, refresh_nonce = ?, \
+          encrypted_id_token = ?, id_nonce = ?, \
           expires_at = ?, last_refresh_at = ?, status = 'active', updated_at = ? \
          WHERE id = ?",
     )
@@ -223,6 +249,8 @@ async fn update_tokens(
     .bind(&access_nonce.as_slice())
     .bind(&enc_refresh)
     .bind(&refresh_nonce.as_slice())
+    .bind(&enc_id)
+    .bind(&id_nonce.as_slice())
     .bind(expires_at.map(|v| v.to_string()))
     .bind(chrono::Utc::now().to_rfc3339())
     .bind(chrono::Utc::now().to_rfc3339())
@@ -405,6 +433,65 @@ pub async fn get_valid_access_token(
             Err(ProxyError::Network(format!("Codex 令牌刷新失败: {}", reason)))
         }
     }
+}
+
+fn row_has_id_token(row: &CodexAccountRow) -> bool {
+    matches!(
+        (&row.encrypted_id_token, &row.id_nonce),
+        (Some(enc), Some(nonce)) if !enc.is_empty() && nonce.len() == NONCE_SIZE
+    )
+}
+
+/// Decrypt stored tokens into the shape needed for an official `auth.json`.
+/// Legacy rows without `id_token` trigger a refresh first; permanent refresh
+/// failure means the user must re-login in 供应商管理.
+pub async fn tokens_for_auth_json(provider_id: &str) -> Result<OfficialAuthTokens, ProxyError> {
+    let row = get_by_provider(provider_id).await?.ok_or_else(|| {
+        ProxyError::Provider("该渠道未绑定 Codex 账号，请先在供应商管理中登录".into())
+    })?;
+    if row.status != "active" {
+        return Err(ProxyError::Provider(
+            "Codex 登录已失效，请先在供应商管理中重新登录".into(),
+        ));
+    }
+
+    if !row_has_id_token(&row) {
+        tracing::info!(
+            "[codex] provider {} missing id_token; refreshing before auth.json export",
+            provider_id
+        );
+        force_refresh(provider_id).await?;
+    }
+
+    let row = get_by_provider(provider_id).await?.ok_or_else(|| {
+        ProxyError::Provider("该渠道未绑定 Codex 账号，请先在供应商管理中登录".into())
+    })?;
+    if !row_has_id_token(&row) {
+        return Err(ProxyError::Provider(
+            "无法获取 id_token（请在供应商管理中重新登录 Codex 官方账号后再注入）".into(),
+        ));
+    }
+
+    let id_token = decrypt_blob(
+        row.encrypted_id_token.as_ref().unwrap(),
+        row.id_nonce.as_ref().unwrap(),
+        "id token",
+    )?;
+    let access_token =
+        decrypt_blob(&row.encrypted_access_token, &row.access_nonce, "access token")?;
+    let refresh_token = decrypt_blob(
+        &row.encrypted_refresh_token,
+        &row.refresh_nonce,
+        "refresh token",
+    )?;
+
+    Ok(OfficialAuthTokens {
+        id_token,
+        access_token,
+        refresh_token,
+        account_id: row.chatgpt_account_id,
+        last_refresh_at: row.last_refresh_at,
+    })
 }
 
 /// Force a refresh right now (manual "刷新令牌" button). Returns the summary.

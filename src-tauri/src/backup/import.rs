@@ -126,6 +126,8 @@ fn is_blob_column(table: &str, col: &str) -> bool {
             | ("codex_accounts", "access_nonce")
             | ("codex_accounts", "encrypted_refresh_token")
             | ("codex_accounts", "refresh_nonce")
+            | ("codex_accounts", "encrypted_id_token")
+            | ("codex_accounts", "id_nonce")
     )
 }
 
@@ -226,36 +228,40 @@ fn decrypt_api_keys(rows: &mut [serde_json::Value], key: &[u8; 32]) -> BackupRes
 
 /// Inverse of `encrypt_codex_accounts`: passphrase-encrypted token pairs back
 /// to machine-master-key BLOBs. Pre-031 bundles have an empty list → no-op.
+/// `id_token` is optional (pre-032 / legacy rows).
 fn decrypt_codex_accounts(rows: &mut [serde_json::Value], key: &[u8; 32]) -> BackupResult<()> {
     for row in rows.iter_mut() {
         let obj = row.as_object_mut().ok_or(BackupError::InvalidFormat)?;
-        for (blob_col, nonce_col) in [
-            ("encrypted_access_token", "access_nonce"),
-            ("encrypted_refresh_token", "refresh_nonce"),
+        for (blob_col, nonce_col, required) in [
+            ("encrypted_access_token", "access_nonce", true),
+            ("encrypted_refresh_token", "refresh_nonce", true),
+            ("encrypted_id_token", "id_nonce", false),
         ] {
-            let ct_b64 = obj
-                .get(blob_col)
-                .and_then(|v| v.as_str())
-                .ok_or(BackupError::InvalidFormat)?;
-            let nonce_b64 = obj
-                .get(nonce_col)
-                .and_then(|v| v.as_str())
-                .ok_or(BackupError::InvalidFormat)?;
-            let ct = B64.decode(ct_b64).map_err(|_| BackupError::InvalidFormat)?;
-            let nonce_bytes = B64
-                .decode(nonce_b64)
-                .map_err(|_| BackupError::InvalidFormat)?;
-            let nonce_arr: [u8; 12] = nonce_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| BackupError::InvalidFormat)?;
-            let plain = passphrase_decrypt(&ct, &nonce_arr, key)?;
-            let (new_ct, new_nonce) = encrypt_api_key(
-                std::str::from_utf8(&plain).map_err(|_| BackupError::InvalidFormat)?,
-            )
-            .map_err(|e| BackupError::Other(e.to_string()))?;
-            obj.insert(blob_col.into(), B64.encode(new_ct).into());
-            obj.insert(nonce_col.into(), B64.encode(new_nonce).into());
+            let ct_b64 = obj.get(blob_col).and_then(|v| v.as_str());
+            let nonce_b64 = obj.get(nonce_col).and_then(|v| v.as_str());
+            match (ct_b64, nonce_b64) {
+                (Some(ct_b64), Some(nonce_b64))
+                    if !ct_b64.is_empty() && !nonce_b64.is_empty() =>
+                {
+                    let ct = B64.decode(ct_b64).map_err(|_| BackupError::InvalidFormat)?;
+                    let nonce_bytes = B64
+                        .decode(nonce_b64)
+                        .map_err(|_| BackupError::InvalidFormat)?;
+                    let nonce_arr: [u8; 12] = nonce_bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| BackupError::InvalidFormat)?;
+                    let plain = passphrase_decrypt(&ct, &nonce_arr, key)?;
+                    let (new_ct, new_nonce) = encrypt_api_key(
+                        std::str::from_utf8(&plain).map_err(|_| BackupError::InvalidFormat)?,
+                    )
+                    .map_err(|e| BackupError::Other(e.to_string()))?;
+                    obj.insert(blob_col.into(), B64.encode(new_ct).into());
+                    obj.insert(nonce_col.into(), B64.encode(new_nonce).into());
+                }
+                _ if required => return Err(BackupError::InvalidFormat),
+                _ => {}
+            }
         }
     }
     Ok(())

@@ -529,6 +529,29 @@ pub async fn init_db(db_path: &str) -> Result<(), sqlx::Error> {
         info!("Applied migration 031: codex_accounts table");
     }
 
+    // Migration 032: store ChatGPT id_token for write-back to ~/.codex/auth.json.
+    let has_id_token: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('codex_accounts') WHERE name = 'encrypted_id_token'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    if !has_id_token {
+        let migration32 = include_str!("../../migrations/032_codex_id_token.sql");
+        let stripped: String = migration32
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed).execute(pool).await?;
+            }
+        }
+        info!("Applied migration 032: codex_accounts id_token columns");
+    }
+
     info!("Database schema initialized");
     Ok(())
 }

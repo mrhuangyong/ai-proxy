@@ -103,6 +103,45 @@ pub struct AppConfig {
     pub status: Option<String>,
 }
 
+/// How Codex launch should treat `~/.codex/auth.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexAuthMode {
+    /// Write proxy API key (`auth_mode = apikey`).
+    Apikey,
+    /// Leave existing auth.json untouched.
+    Preserve,
+    /// Write ChatGPT OAuth tokens from a `codex_accounts` row.
+    Inject,
+}
+
+impl CodexAuthMode {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "apikey" => Some(Self::Apikey),
+            "preserve" => Some(Self::Preserve),
+            "inject" => Some(Self::Inject),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Apikey => "apikey",
+            Self::Preserve => "preserve",
+            Self::Inject => "inject",
+        }
+    }
+
+    /// Map legacy `codex_preserve_auth` ("true"/"false") to a mode.
+    pub fn from_preserve_flag(preserve: bool) -> Self {
+        if preserve {
+            Self::Preserve
+        } else {
+            Self::Apikey
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LaunchRequest {
     pub app_type: String,
@@ -114,6 +153,10 @@ pub struct LaunchRequest {
     /// codex only: see `AppConfig::visible_models`.
     pub visible_models: Option<Vec<String>>,
     pub work_dir: Option<String>,
+    /// codex only: `apikey` | `preserve` | `inject`.
+    pub codex_auth_mode: Option<String>,
+    /// codex only: provider_id of the Codex OAuth account to inject.
+    pub codex_account_provider_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,4 +176,26 @@ pub struct DbAppConfig {
     pub status: String,
     pub work_dir: Option<String>,
     pub model_config: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodexAuthMode;
+
+    #[test]
+    fn auth_mode_parse_and_legacy_flag() {
+        assert_eq!(CodexAuthMode::from_str("apikey"), Some(CodexAuthMode::Apikey));
+        assert_eq!(CodexAuthMode::from_str("preserve"), Some(CodexAuthMode::Preserve));
+        assert_eq!(CodexAuthMode::from_str("inject"), Some(CodexAuthMode::Inject));
+        assert_eq!(CodexAuthMode::from_str("nope"), None);
+        assert_eq!(
+            CodexAuthMode::from_preserve_flag(true),
+            CodexAuthMode::Preserve
+        );
+        assert_eq!(
+            CodexAuthMode::from_preserve_flag(false),
+            CodexAuthMode::Apikey
+        );
+        assert_eq!(CodexAuthMode::Inject.as_str(), "inject");
+    }
 }

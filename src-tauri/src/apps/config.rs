@@ -1,4 +1,5 @@
-use crate::apps::types::AppType;
+use crate::apps::types::{AppType, CodexAuthMode};
+use crate::codex::store::OfficialAuthTokens;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -178,7 +179,8 @@ pub async fn write_codex_config(
     model: &str,
     proxy_base: &str,
     api_key: &str,
-    preserve_auth: bool,
+    auth_mode: CodexAuthMode,
+    official_tokens: Option<&OfficialAuthTokens>,
     context_window: u64,
     visible_models: Option<&[String]>,
     context_windows: &HashMap<String, u64>,
@@ -305,14 +307,33 @@ pub async fn write_codex_config(
     atomic_write(&path, &content).await?;
     tracing::info!("Wrote codex config to {:?}", path);
 
-    // Only overwrite auth.json when preserve_auth is disabled
-    if !preserve_auth {
-        write_codex_auth(api_key).await?;
-    } else {
-        tracing::info!("Preserving existing codex auth.json (preserve_auth enabled)");
+    match auth_mode {
+        CodexAuthMode::Preserve => {
+            tracing::info!("Preserving existing codex auth.json (auth_mode=preserve)");
+        }
+        CodexAuthMode::Apikey => {
+            write_codex_auth(api_key).await?;
+        }
+        CodexAuthMode::Inject => {
+            let tokens = official_tokens.ok_or_else(|| {
+                "inject 模式缺少官方凭证（请选择已登录的 Codex 供应商账号）".to_string()
+            })?;
+            write_codex_official_auth(tokens).await?;
+        }
     }
 
     Ok(path)
+}
+
+async fn backup_codex_auth_if_changed(path: &PathBuf, new_content: &str) {
+    if let Ok(old) = tokio::fs::read_to_string(path).await {
+        if old != new_content {
+            let bak = path.with_extension("json.aiproxy.bak");
+            if let Err(e) = tokio::fs::write(&bak, &old).await {
+                tracing::warn!("Failed to back up codex auth to {:?}: {}", bak, e);
+            }
+        }
+    }
 }
 
 async fn write_codex_auth(api_key: &str) -> Result<(), String> {
@@ -352,8 +373,48 @@ async fn write_codex_auth(api_key: &str) -> Result<(), String> {
             .map_err(|e| format!("Failed to create auth directory: {}", e))?;
     }
 
+    backup_codex_auth_if_changed(&path, &content).await;
     atomic_write(&path, &content).await?;
-    tracing::info!("Wrote codex auth to {:?}", path);
+    tracing::info!("Wrote codex auth (apikey) to {:?}", path);
+    Ok(())
+}
+
+/// Build the official ChatGPT `auth.json` document (no I/O).
+pub(crate) fn build_official_auth_json(tokens: &OfficialAuthTokens) -> serde_json::Value {
+    let account_id = tokens.account_id.clone().unwrap_or_default();
+    let last_refresh = tokens
+        .last_refresh_at
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "id_token": tokens.id_token,
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "account_id": account_id,
+        },
+        "last_refresh": last_refresh,
+        "OPENAI_API_KEY": serde_json::Value::Null,
+    })
+}
+
+/// Write ChatGPT OAuth tokens into `~/.codex/auth.json` (official shape).
+pub async fn write_codex_official_auth(tokens: &OfficialAuthTokens) -> Result<(), String> {
+    let path = codex_auth_path();
+    let auth = build_official_auth_json(tokens);
+    let content = serde_json::to_string_pretty(&auth)
+        .map_err(|e| format!("Failed to serialize official auth.json: {}", e))?;
+
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to create auth directory: {}", e))?;
+    }
+
+    backup_codex_auth_if_changed(&path, &content).await;
+    atomic_write(&path, &content).await?;
+    tracing::info!("Wrote codex auth (chatgpt/official) to {:?}", path);
     Ok(())
 }
 
@@ -673,7 +734,8 @@ pub async fn write_config(
     model_opus: Option<&str>,
     proxy_base: &str,
     api_key: &str,
-    preserve_auth: bool,
+    auth_mode: CodexAuthMode,
+    official_tokens: Option<&OfficialAuthTokens>,
     context_window: u64,
     visible_models: Option<&[String]>,
     context_windows: &HashMap<String, u64>,
@@ -685,7 +747,8 @@ pub async fn write_config(
                 model,
                 proxy_base,
                 api_key,
-                preserve_auth,
+                auth_mode,
+                official_tokens,
                 context_window,
                 visible_models,
                 context_windows,
@@ -1177,5 +1240,38 @@ mod catalog_tests {
         let tools = m["experimental_supported_tools"].as_array().unwrap();
         assert!(!tools.iter().any(|t| t == "view_image"));
         assert!(tools.iter().any(|t| t == "web_search"));
+    }
+
+    #[test]
+    fn official_auth_json_matches_import_shape() {
+        let tokens = OfficialAuthTokens {
+            id_token: "id.jwt".into(),
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            account_id: Some("acc-1".into()),
+            last_refresh_at: Some("2026-01-01T00:00:00Z".into()),
+        };
+        let doc = build_official_auth_json(&tokens);
+        assert_eq!(doc["auth_mode"], "chatgpt");
+        assert_eq!(doc["tokens"]["id_token"], "id.jwt");
+        assert_eq!(doc["tokens"]["access_token"], "access");
+        assert_eq!(doc["tokens"]["refresh_token"], "refresh");
+        assert_eq!(doc["tokens"]["account_id"], "acc-1");
+        assert_eq!(doc["last_refresh"], "2026-01-01T00:00:00Z");
+        assert!(doc["OPENAI_API_KEY"].is_null());
+    }
+
+    #[test]
+    fn official_auth_json_defaults_empty_account_id() {
+        let tokens = OfficialAuthTokens {
+            id_token: "id".into(),
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            account_id: None,
+            last_refresh_at: None,
+        };
+        let doc = build_official_auth_json(&tokens);
+        assert_eq!(doc["tokens"]["account_id"], "");
+        assert!(doc["last_refresh"].as_str().unwrap().len() > 0);
     }
 }

@@ -1270,6 +1270,10 @@ struct Settings {
     connect_timeout: String,
     max_request_body_mb: String,
     codex_preserve_auth: String,
+    /// `apikey` | `preserve` | `inject` — preferred over `codex_preserve_auth`.
+    codex_auth_mode: String,
+    /// provider_id of the Codex OAuth account used for inject mode.
+    codex_inject_provider_id: String,
     extract_system_from_messages: String,
     upstream_invisible_retry_mode: String,
     upstream_invisible_retry_total_timeout_secs: String,
@@ -1281,10 +1285,25 @@ struct Settings {
 async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
     let pool = get_pool().await;
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT key, value FROM settings WHERE key IN ('http_port', 'log_retention_days', 'record_request_body', 'proxy_auth_enabled', 'proxy_auth_key', 'request_timeout', 'connect_timeout', 'max_request_body_mb', 'codex_preserve_auth', 'upstream_max_retries', 'upstream_retry_backoff_base_ms', 'extract_system_from_messages', 'upstream_invisible_retry_mode', 'upstream_invisible_retry_total_timeout_secs', 'upstream_invisible_retry_buffer_limit_mb', 'upstream_user_agent', 'passthrough_enabled')"
+        "SELECT key, value FROM settings WHERE key IN ('http_port', 'log_retention_days', 'record_request_body', 'proxy_auth_enabled', 'proxy_auth_key', 'request_timeout', 'connect_timeout', 'max_request_body_mb', 'codex_preserve_auth', 'codex_auth_mode', 'codex_inject_provider_id', 'upstream_max_retries', 'upstream_retry_backoff_base_ms', 'extract_system_from_messages', 'upstream_invisible_retry_mode', 'upstream_invisible_retry_total_timeout_secs', 'upstream_invisible_retry_buffer_limit_mb', 'upstream_user_agent', 'passthrough_enabled')"
     ).fetch_all(pool).await.map_err(|e| err_json(e.to_string()))?;
 
     let map: HashMap<String, String> = rows.into_iter().collect();
+    let preserve_auth = map
+        .get("codex_preserve_auth")
+        .cloned()
+        .unwrap_or_else(|| "false".into());
+    let auth_mode = map
+        .get("codex_auth_mode")
+        .cloned()
+        .filter(|s| matches!(s.as_str(), "apikey" | "preserve" | "inject"))
+        .unwrap_or_else(|| {
+            if preserve_auth == "true" {
+                "preserve".into()
+            } else {
+                "apikey".into()
+            }
+        });
     Ok(ok(Settings {
         http_port: map
             .get("http_port")
@@ -1315,10 +1334,12 @@ async fn get_settings() -> Result<Json<ApiResponse<Settings>>, Json<ApiError>> {
             .get("max_request_body_mb")
             .cloned()
             .unwrap_or_else(|| crate::server::handlers::DEFAULT_MAX_REQUEST_BODY_MB.to_string()),
-        codex_preserve_auth: map
-            .get("codex_preserve_auth")
+        codex_preserve_auth: preserve_auth,
+        codex_auth_mode: auth_mode,
+        codex_inject_provider_id: map
+            .get("codex_inject_provider_id")
             .cloned()
-            .unwrap_or_else(|| "false".into()),
+            .unwrap_or_default(),
         upstream_max_retries: map
             .get("upstream_max_retries")
             .cloned()
@@ -1364,6 +1385,8 @@ struct UpdateSettingsBody {
     connect_timeout: Option<String>,
     max_request_body_mb: Option<String>,
     codex_preserve_auth: Option<String>,
+    codex_auth_mode: Option<String>,
+    codex_inject_provider_id: Option<String>,
     extract_system_from_messages: Option<String>,
     upstream_invisible_retry_mode: Option<String>,
     upstream_invisible_retry_total_timeout_secs: Option<String>,
@@ -1386,6 +1409,8 @@ async fn update_settings(
         ("connect_timeout", body.connect_timeout),
         ("max_request_body_mb", body.max_request_body_mb),
         ("codex_preserve_auth", body.codex_preserve_auth),
+        ("codex_auth_mode", body.codex_auth_mode),
+        ("codex_inject_provider_id", body.codex_inject_provider_id),
         ("upstream_max_retries", body.upstream_max_retries),
         (
             "upstream_retry_backoff_base_ms",
