@@ -52,6 +52,8 @@ struct DbResolvableCandidate {
     endpoint_path: Option<String>,
     upstream_user_agent: String,
     provider_name: String,
+    /// Migration 031: `standard` | `codex_oauth` outbound auth selector.
+    provider_kind: String,
     /// Aliased in SQL `ORDER BY` for sticky-first sorting; not read from the row.
     #[allow(dead_code)]
     sticky: i64,
@@ -138,6 +140,7 @@ impl VirtualRouter {
                 p.endpoint_path,
                 p.upstream_user_agent,
                 p.name AS provider_name,
+                COALESCE(p.provider_kind, 'standard') AS provider_kind,
                 CASE WHEN v.current_mapping_id = m.id THEN 1 ELSE 0 END AS sticky,
                 pm.supports_thinking,
                 pm.supports_tools,
@@ -233,6 +236,7 @@ impl VirtualRouter {
                 target_model,
                 endpoint_path,
                 upstream_user_agent: c.upstream_user_agent,
+                provider_kind: c.provider_kind,
                 capabilities: caps,
                 protocols,
             },

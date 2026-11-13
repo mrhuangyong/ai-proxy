@@ -1,5 +1,52 @@
 export type ProviderFormat = 'completions' | 'responses' | 'anthropic' | 'gemini'
 
+/**
+ * Provider credential kind. `standard` = static API key (default);
+ * `codex_oauth` = Codex 官方渠道 (ChatGPT OAuth, credential in codex_accounts).
+ */
+export type ProviderKind = 'standard' | 'codex_oauth'
+
+/** Codex account summary attached to a codex_oauth provider (never carries tokens). */
+export interface CodexAccountSummary {
+  id: string
+  provider_id: string
+  chatgpt_account_id: string | null
+  email: string | null
+  plan_type: string | null
+  expires_at: string | null
+  last_refresh_at: string | null
+  /** active | expired | missing (no account bound yet) */
+  status: 'active' | 'expired' | 'missing' | string
+}
+
+/** Codex OAuth login session status (polled while the browser flow runs). */
+export interface CodexLoginStatus {
+  status: 'pending' | 'completed' | 'failed'
+  /** Present when failed. */
+  error?: string
+  /** Present when completed (nested; never flatten — summary also has `status`). */
+  account?: CodexAccountSummary
+}
+
+/** One Codex usage-quota window (e.g. 5h / weekly). Percents may be floats. */
+export interface CodexUsageWindow {
+  label: string
+  limit_window_seconds: number
+  used_percent: number
+  remaining_percent: number
+  reset_at: string | null
+  reset_after_seconds: number | null
+}
+
+/** Codex usage quota snapshot from GET /api/codex/accounts/:provider_id/usage. */
+export interface CodexUsageSnapshot {
+  plan_type: string | null
+  allowed: boolean
+  limit_reached: boolean
+  windows: CodexUsageWindow[]
+  fetched_at: string
+}
+
 /** One upstream protocol a provider speaks (base_url/endpoint optionally override the provider defaults). */
 export interface ProviderProtocol {
   format: ProviderFormat
@@ -19,6 +66,10 @@ export interface Provider {
   endpoint_path?: string | null
   upstream_user_agent?: string
   enabled: boolean
+  /** standard (default) | codex_oauth (migration 031) */
+  provider_kind?: ProviderKind
+  /** Present only on codex_oauth providers. */
+  codex_account?: CodexAccountSummary | null
   models: ProviderModel[]
   api_keys: ApiKeyInfo[]
   protocols: ProviderProtocol[]

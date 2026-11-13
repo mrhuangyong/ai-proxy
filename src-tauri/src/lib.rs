@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod codex;
 pub mod converter;
 pub mod db;
 pub mod error;

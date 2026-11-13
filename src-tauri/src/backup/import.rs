@@ -39,6 +39,7 @@ pub async fn import_bundle(
         !matches!(k, "backup_passphrase" | "sync_webdav_password")
     });
     decrypt_api_keys(&mut data.api_keys, &key)?;
+    decrypt_codex_accounts(&mut data.codex_accounts, &key)?;
     decrypt_sensitive_settings(&mut data.settings, &key)?;
     decrypt_mcp_secrets(&mut data.mcp_servers, &key)?;
 
@@ -52,6 +53,7 @@ pub async fn import_bundle(
         ("provider_protocols", &data.provider_protocols),
         ("provider_models", &data.provider_models),
         ("api_keys", &data.api_keys),
+        ("codex_accounts", &data.codex_accounts),
         ("interceptor_rules", &data.interceptor_rules),
         ("virtual_models", &data.virtual_models),
         ("virtual_model_mappings", &data.virtual_model_mappings),
@@ -84,6 +86,7 @@ async fn integer_columns(pool: &SqlitePool) -> BackupResult<HashMap<&'static str
         "provider_protocols",
         "provider_models",
         "api_keys",
+        "codex_accounts",
         "interceptor_rules",
         "virtual_models",
         "virtual_model_mappings",
@@ -110,13 +113,19 @@ async fn integer_columns(pool: &SqlitePool) -> BackupResult<HashMap<&'static str
     Ok(out)
 }
 
-/// Schema knowledge: which (table, column) pairs are BLOB. Only api_keys has
-/// BLOB columns (encrypted_key, nonce). All other columns are TEXT/INTEGER and
-/// are stored/restored as strings — SQLite applies column affinity on insert.
+/// Schema knowledge: which (table, column) pairs are BLOB. api_keys and
+/// codex_accounts carry encrypted BLOB pairs; all other columns are
+/// TEXT/INTEGER and are stored/restored as strings — SQLite applies column
+/// affinity on insert.
 fn is_blob_column(table: &str, col: &str) -> bool {
     matches!(
         (table, col),
-        ("api_keys", "encrypted_key") | ("api_keys", "nonce")
+        ("api_keys", "encrypted_key")
+            | ("api_keys", "nonce")
+            | ("codex_accounts", "encrypted_access_token")
+            | ("codex_accounts", "access_nonce")
+            | ("codex_accounts", "encrypted_refresh_token")
+            | ("codex_accounts", "refresh_nonce")
     )
 }
 
@@ -211,6 +220,43 @@ fn decrypt_api_keys(rows: &mut [serde_json::Value], key: &[u8; 32]) -> BackupRes
                 .map_err(|e| BackupError::Other(e.to_string()))?;
         obj.insert("encrypted_key".into(), B64.encode(new_ct).into());
         obj.insert("nonce".into(), B64.encode(new_nonce).into());
+    }
+    Ok(())
+}
+
+/// Inverse of `encrypt_codex_accounts`: passphrase-encrypted token pairs back
+/// to machine-master-key BLOBs. Pre-031 bundles have an empty list → no-op.
+fn decrypt_codex_accounts(rows: &mut [serde_json::Value], key: &[u8; 32]) -> BackupResult<()> {
+    for row in rows.iter_mut() {
+        let obj = row.as_object_mut().ok_or(BackupError::InvalidFormat)?;
+        for (blob_col, nonce_col) in [
+            ("encrypted_access_token", "access_nonce"),
+            ("encrypted_refresh_token", "refresh_nonce"),
+        ] {
+            let ct_b64 = obj
+                .get(blob_col)
+                .and_then(|v| v.as_str())
+                .ok_or(BackupError::InvalidFormat)?;
+            let nonce_b64 = obj
+                .get(nonce_col)
+                .and_then(|v| v.as_str())
+                .ok_or(BackupError::InvalidFormat)?;
+            let ct = B64.decode(ct_b64).map_err(|_| BackupError::InvalidFormat)?;
+            let nonce_bytes = B64
+                .decode(nonce_b64)
+                .map_err(|_| BackupError::InvalidFormat)?;
+            let nonce_arr: [u8; 12] = nonce_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| BackupError::InvalidFormat)?;
+            let plain = passphrase_decrypt(&ct, &nonce_arr, key)?;
+            let (new_ct, new_nonce) = encrypt_api_key(
+                std::str::from_utf8(&plain).map_err(|_| BackupError::InvalidFormat)?,
+            )
+            .map_err(|e| BackupError::Other(e.to_string()))?;
+            obj.insert(blob_col.into(), B64.encode(new_ct).into());
+            obj.insert(nonce_col.into(), B64.encode(new_nonce).into());
+        }
     }
     Ok(())
 }

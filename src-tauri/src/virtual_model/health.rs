@@ -80,28 +80,49 @@ async fn load_probe_max_tokens() -> u32 {
 async fn probe(provider_id: &str, model_name: &str, max_tokens: u32) -> Result<(), String> {
     use serde_json::json;
 
-    let selected_key = KeyRotation::get_next_key(provider_id, &RotationStrategy::LeastUsed)
-        .await
-        .map_err(|e| format!("key rotation: {}", e))?;
-
-    let mut nonce = [0u8; 12];
-    if selected_key.nonce.len() == 12 {
-        nonce.copy_from_slice(&selected_key.nonce);
-    } else {
-        return Err("invalid nonce length".into());
-    }
-    let api_key = decrypt_api_key(&selected_key.encrypted_key, &nonce)
-        .map_err(|e| format!("decrypt: {}", e))?;
-
     // Resolve base url & format for this provider.
     let pool = get_pool().await;
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT base_url, format FROM providers WHERE id = ?")
+    let row: Option<(String, String, String)> =
+        sqlx::query_as("SELECT base_url, format, COALESCE(provider_kind, 'standard') FROM providers WHERE id = ?")
             .bind(provider_id)
             .fetch_optional(pool)
             .await
             .map_err(|e| format!("db: {}", e))?;
-    let (base_url, format) = row.ok_or_else(|| "provider not found".to_string())?;
+    let (base_url, format, provider_kind) =
+        row.ok_or_else(|| "provider not found".to_string())?;
+
+    let mut extra = std::collections::HashMap::new();
+    let api_key: String = if provider_kind == crate::codex::PROVIDER_KIND_CODEX {
+        // Codex OAuth channel: the credential is the refreshed token.
+        let (token, account_id) = crate::codex::store::get_valid_access_token(provider_id)
+            .await
+            .map_err(|e| format!("codex auth: {}", e))?;
+        if let Some(acc) = account_id.filter(|a| !a.is_empty()) {
+            extra.insert("chatgpt-account-id".to_string(), acc);
+        }
+        extra.insert(
+            crate::codex::HEADER_OPENAI_BETA.to_string(),
+            crate::codex::OPENAI_BETA_VALUE.to_string(),
+        );
+        extra.insert(
+            crate::codex::HEADER_ORIGINATOR.to_string(),
+            crate::codex::ORIGINATOR.to_string(),
+        );
+        token
+    } else {
+        let selected_key = KeyRotation::get_next_key(provider_id, &RotationStrategy::LeastUsed)
+            .await
+            .map_err(|e| format!("key rotation: {}", e))?;
+
+        let mut nonce = [0u8; 12];
+        if selected_key.nonce.len() == 12 {
+            nonce.copy_from_slice(&selected_key.nonce);
+        } else {
+            return Err("invalid nonce length".into());
+        }
+        decrypt_api_key(&selected_key.encrypted_key, &nonce)
+            .map_err(|e| format!("decrypt: {}", e))?
+    };
 
     let body = json!({
         "model": model_name,
@@ -122,6 +143,9 @@ async fn probe(provider_id: &str, model_name: &str, max_tokens: u32) -> Result<(
             .header("anthropic-version", "2023-06-01"),
         _ => req.bearer_auth(&api_key),
     };
+    for (k, v) in &extra {
+        req = req.header(k.as_str(), v.as_str());
+    }
 
     let resp = req.send().await.map_err(|e| format!("send: {}", e))?;
     let status = resp.status();
