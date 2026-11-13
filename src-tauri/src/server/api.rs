@@ -96,9 +96,36 @@ async fn provider_name_exists(pool: &sqlx::SqlitePool, name: &str, exclude_id: &
 
 // --- Provider handlers ---
 
-async fn list_providers() -> Result<Json<ApiResponse<Vec<Provider>>>, Json<ApiError>> {
+/// Provider plus its Codex account summary (`codex_account` present only for
+/// `provider_kind = "codex_oauth"` rows; never contains tokens).
+#[derive(Serialize)]
+struct ProviderWithCodex {
+    #[serde(flatten)]
+    provider: Provider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_account: Option<crate::codex::store::CodexAccountSummary>,
+}
+
+async fn list_providers() -> Result<Json<ApiResponse<Vec<ProviderWithCodex>>>, Json<ApiError>> {
     match ProviderManager::list().await {
-        Ok(providers) => Ok(ok(providers)),
+        Ok(providers) => {
+            let mut out = Vec::with_capacity(providers.len());
+            for provider in providers {
+                let codex_account = if provider.provider_kind == crate::codex::PROVIDER_KIND_CODEX
+                {
+                    crate::codex::store::summary_for_provider(&provider.id)
+                        .await
+                        .map_err(|e| err_json(e.to_string()))?
+                } else {
+                    None
+                };
+                out.push(ProviderWithCodex {
+                    provider,
+                    codex_account,
+                });
+            }
+            Ok(ok(out))
+        }
         Err(e) => {
             tracing::error!("list_providers error: {}", e);
             Err(err_json(e.to_string()))
@@ -113,13 +140,28 @@ struct CreateProviderBody {
     format: String,
     endpoint_path: Option<String>,
     upstream_user_agent: Option<String>,
+    /// Empty is allowed (and expected) for `provider_kind = "codex_oauth"`.
     api_key: String,
     models: Vec<ModelInput>,
+    /// `standard` (default) | `codex_oauth` — Codex ChatGPT OAuth channel
+    /// whose credential lives in `codex_accounts` (migration 031).
+    provider_kind: Option<String>,
     /// Full upstream protocol list (migration 028). When present it replaces
     /// the provider's protocols; the primary row is mirrored onto
     /// `providers.format` / `providers.endpoint_path` for legacy callers.
     /// Omitted → single-protocol behaviour, unchanged.
     protocols: Option<Vec<ProtocolInput>>,
+}
+
+/// Normalize the incoming provider kind: the frontend sends the pseudo value
+/// `"codex"` for the Codex official option; everything else maps to standard.
+fn normalize_provider_kind(kind: Option<&str>) -> &str {
+    match kind {
+        Some(k) if k == "codex" || k == crate::codex::PROVIDER_KIND_CODEX => {
+            crate::codex::PROVIDER_KIND_CODEX
+        }
+        _ => crate::codex::PROVIDER_KIND_STANDARD,
+    }
 }
 
 /// One upstream protocol entry ({format, base_url?, endpoint_path?, is_primary}).
@@ -204,7 +246,7 @@ async fn save_provider_protocols(
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ModelInput {
     /// Provider-model row id. Present when editing an existing provider's
     /// models so we can UPDATE in place and preserve the row id (which
@@ -222,7 +264,7 @@ struct ModelInput {
 
 /// Incoming capability overrides. Every field is optional; `None` keeps the
 /// DB column at its permissive default (1, or NULL for `max_output_tokens`).
-#[derive(Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 struct CapabilitiesInput {
     supports_thinking: Option<bool>,
     supports_tools: Option<bool>,
@@ -251,20 +293,53 @@ async fn create_provider(
         return Err(err_json(format!("供应商名称 '{}' 已存在", body.name)));
     }
 
+    let is_codex = normalize_provider_kind(body.provider_kind.as_deref())
+        == crate::codex::PROVIDER_KIND_CODEX;
+
+    // Codex OAuth channels are fixed-shape: official ChatGPT backend over the
+    // Responses wire. Ignore caller-supplied base_url/format/endpoint when
+    // they would break that contract.
+    let (base_url, format, endpoint_path) = if is_codex {
+        (
+            crate::codex::DEFAULT_BASE_URL.to_string(),
+            "responses".to_string(),
+            Some(crate::codex::DEFAULT_ENDPOINT_PATH.to_string()),
+        )
+    } else {
+        (body.base_url.clone(), body.format.clone(), body.endpoint_path.clone())
+    };
+
     sqlx::query(
-        "INSERT INTO providers (id, name, base_url, format, endpoint_path, upstream_user_agent) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO providers (id, name, base_url, format, endpoint_path, upstream_user_agent, provider_kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&body.name)
-    .bind(&body.base_url)
-    .bind(&body.format)
-    .bind(&body.endpoint_path)
+    .bind(&base_url)
+    .bind(&format)
+    .bind(&endpoint_path)
     .bind(body.upstream_user_agent.as_deref().unwrap_or(""))
+    .bind(normalize_provider_kind(body.provider_kind.as_deref()))
     .execute(pool)
     .await
     .map_err(|e| err_json(e.to_string()))?;
 
-    for m in &body.models {
+    // Codex channels seed the official model slugs when the caller sent none.
+    let models = if is_codex && body.models.is_empty() {
+        crate::codex::DEFAULT_MODELS
+            .iter()
+            .map(|slug| ModelInput {
+                id: None,
+                model_name: slug.to_string(),
+                target_model: None,
+                context_window: None,
+                capabilities: None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        body.models.clone()
+    };
+
+    for m in &models {
         let model_id = uuid::Uuid::new_v4().to_string();
         let caps = cap_overrides_for(m.capabilities.as_ref());
         sqlx::query(
@@ -286,15 +361,32 @@ async fn create_provider(
         .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
     }
 
-    let (encrypted, nonce) = encrypt_api_key(&body.api_key).map_err(|e| err_json(e.to_string()))?;
-    let key_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO api_keys (id, provider_id, label, encrypted_key, nonce) VALUES (?, ?, ?, ?, ?)")
-        .bind(&key_id).bind(&id).bind(&body.name).bind(&encrypted).bind(&nonce.as_slice())
-        .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
+    if body.api_key.is_empty() && !is_codex {
+        return Err(err_json("API Key 不能为空"));
+    }
+    if !body.api_key.is_empty() {
+        let (encrypted, nonce) = encrypt_api_key(&body.api_key).map_err(|e| err_json(e.to_string()))?;
+        let key_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO api_keys (id, provider_id, label, encrypted_key, nonce) VALUES (?, ?, ?, ?, ?)")
+            .bind(&key_id).bind(&id).bind(&body.name).bind(&encrypted).bind(&nonce.as_slice())
+            .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
+    }
 
     if let Some(mut protocols) = body.protocols.clone() {
         normalize_protocols(&mut protocols).map_err(err_json)?;
         save_provider_protocols(pool, &id, &protocols).await?;
+    } else if is_codex {
+        // Single responses protocol pinned to the official endpoint.
+        sqlx::query(
+            "INSERT INTO provider_protocols (id, provider_id, format, base_url, endpoint_path, is_primary) VALUES (?, ?, ?, NULL, ?, 1)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&id)
+        .bind("responses")
+        .bind(crate::codex::DEFAULT_ENDPOINT_PATH)
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
     } else {
         // Legacy single-protocol create: seed the primary row so
         // provider_protocols stays authoritative for routing.
@@ -321,8 +413,11 @@ struct UpdateProviderBody {
     format: Option<String>,
     endpoint_path: Option<Option<String>>,
     upstream_user_agent: Option<String>,
+    /// Empty string = unchanged (the edit form echoes the stored key).
     api_key: Option<String>,
     models: Option<Vec<ModelInput>>,
+    /// Present → change the provider kind (codex ↔ standard migration).
+    provider_kind: Option<String>,
     /// Full protocol list replacement (see `CreateProviderBody`). Omitted →
     /// protocols untouched; the flat format/endpoint_path fields keep working.
     protocols: Option<Vec<ProtocolInput>>,
@@ -334,26 +429,37 @@ async fn update_provider(
 ) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
     let pool = get_pool().await;
 
-    let current: (String, String, String, Option<String>, String) =
-        sqlx::query_as("SELECT name, base_url, format, endpoint_path, upstream_user_agent FROM providers WHERE id = ?")
+    let current: (String, String, String, Option<String>, String, String) =
+        sqlx::query_as("SELECT name, base_url, format, endpoint_path, upstream_user_agent, COALESCE(provider_kind, 'standard') FROM providers WHERE id = ?")
             .bind(&id)
             .fetch_one(pool)
             .await
             .map_err(|e| err_json(e.to_string()))?;
 
     let name = body.name.unwrap_or(current.0);
-    let base_url = body.base_url.unwrap_or(current.1);
-    let format = body.format.clone().unwrap_or(current.2);
-    let endpoint_path = body.endpoint_path.clone().unwrap_or(current.3);
+    let mut base_url = body.base_url.unwrap_or(current.1);
+    let mut format = body.format.clone().unwrap_or(current.2);
+    let mut endpoint_path = body.endpoint_path.clone().unwrap_or(current.3);
     let upstream_user_agent = body.upstream_user_agent.unwrap_or(current.4);
+    let kind = match body.provider_kind.as_deref() {
+        Some(k) => normalize_provider_kind(Some(k)).to_string(),
+        None => current.5,
+    };
+    let is_codex = kind == crate::codex::PROVIDER_KIND_CODEX;
+    if is_codex {
+        // Re-pin the fixed Codex contract when kind switches to codex_oauth.
+        base_url = crate::codex::DEFAULT_BASE_URL.to_string();
+        format = "responses".to_string();
+        endpoint_path = Some(crate::codex::DEFAULT_ENDPOINT_PATH.to_string());
+    }
 
     validate_provider_name(&name)?;
     if provider_name_exists(&pool, &name, &id).await {
         return Err(err_json(format!("供应商名称 '{}' 已存在", name)));
     }
 
-    sqlx::query("UPDATE providers SET name = ?, base_url = ?, format = ?, endpoint_path = ?, upstream_user_agent = ?, updated_at = datetime('now') WHERE id = ?")
-        .bind(&name).bind(&base_url).bind(&format).bind(&endpoint_path).bind(&upstream_user_agent).bind(&id)
+    sqlx::query("UPDATE providers SET name = ?, base_url = ?, format = ?, endpoint_path = ?, upstream_user_agent = ?, provider_kind = ?, updated_at = datetime('now') WHERE id = ?")
+        .bind(&name).bind(&base_url).bind(&format).bind(&endpoint_path).bind(&upstream_user_agent).bind(&kind).bind(&id)
         .execute(pool).await.map_err(|e| err_json(e.to_string()))?;
 
     if let Some(models) = body.models {
@@ -363,7 +469,8 @@ async fn update_provider(
     if let Some(mut protocols) = body.protocols.clone() {
         normalize_protocols(&mut protocols).map_err(err_json)?;
         save_provider_protocols(pool, &id, &protocols).await?;
-    } else if body.format.is_some() || body.endpoint_path.is_some() {
+    } else if body.format.is_some() || body.endpoint_path.is_some() || body.provider_kind.is_some()
+    {
         // Legacy flat update without a protocol list: keep the primary row in
         // sync so routing (which prefers provider_protocols) agrees with the
         // flat columns. Drop any non-primary row that would now collide with
@@ -618,6 +725,13 @@ fn cap_overrides_for(caps: Option<&CapabilitiesInput>) -> CapOverrides {
 
 async fn delete_provider(Path(id): Path<String>) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
     let pool = get_pool().await;
+    // Explicit account cleanup: SQLite FK cascade only fires with
+    // `PRAGMA foreign_keys = ON`, which is not guaranteed here.
+    sqlx::query("DELETE FROM codex_accounts WHERE provider_id = ?")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
     sqlx::query("DELETE FROM providers WHERE id = ?")
         .bind(&id)
         .execute(pool)
@@ -1335,6 +1449,8 @@ struct ProbeModelsBody {
     endpoint_path: Option<String>,
     api_key: Option<String>,
     upstream_user_agent: Option<String>,
+    /// Frontend hint for the Codex official option (probe is unsupported there).
+    provider_kind: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1426,6 +1542,14 @@ async fn stored_provider_key(
 async fn probe_models(
     axum::Json(body): axum::Json<ProbeModelsBody>,
 ) -> Result<Json<ApiResponse<ProbeModelsResult>>, Json<ApiError>> {
+    if normalize_provider_kind(body.provider_kind.as_deref())
+        == crate::codex::PROVIDER_KIND_CODEX
+    {
+        return Ok(probe_fail(
+            "Codex 官方渠道不支持探测模型，请手动维护模型列表",
+            None,
+        ));
+    }
     if body.base_url.trim().trim_end_matches('/').is_empty() {
         return Ok(probe_fail("Base URL 不能为空", None));
     }
@@ -1625,44 +1749,67 @@ async fn test_model(
         }
     };
 
-    let selected_key =
-        match KeyRotation::get_next_key(&route.provider_id, &RotationStrategy::LeastUsed).await {
-            Ok(k) => k,
+    let mut extra_codex_headers: HashMap<String, String> = HashMap::new();
+    let api_key: String = if route.provider_kind == crate::codex::PROVIDER_KIND_CODEX {
+        // Codex OAuth channel: the credential is the refreshed access token.
+        let mut headers = HashMap::new();
+        match crate::codex::resolve_outbound_auth(&route, &mut headers).await {
+            Ok(Some(token)) => {
+                extra_codex_headers = headers;
+                token
+            }
+            Ok(None) => unreachable!("codex route always yields a token"),
             Err(e) => {
                 return Ok(ok(TestModelResult {
                     success: false,
-                    message: "未找到可用的 API Key".into(),
+                    message: "Codex 凭证不可用".into(),
                     response_text: None,
                     duration_ms: None,
                     error: Some(e.to_string()),
                 }));
             }
-        };
-
-    let nonce_slice = selected_key.nonce;
-    let mut nonce_array = [0u8; 12];
-    if nonce_slice.len() == 12 {
-        nonce_array.copy_from_slice(&nonce_slice);
+        }
     } else {
-        return Ok(ok(TestModelResult {
-            success: false,
-            message: "Nonce 格式错误".into(),
-            response_text: None,
-            duration_ms: None,
-            error: Some("invalid nonce length".into()),
-        }));
-    }
+        let selected_key =
+            match KeyRotation::get_next_key(&route.provider_id, &RotationStrategy::LeastUsed).await
+            {
+                Ok(k) => k,
+                Err(e) => {
+                    return Ok(ok(TestModelResult {
+                        success: false,
+                        message: "未找到可用的 API Key".into(),
+                        response_text: None,
+                        duration_ms: None,
+                        error: Some(e.to_string()),
+                    }));
+                }
+            };
 
-    let api_key = match decrypt_api_key(&selected_key.encrypted_key, &nonce_array) {
-        Ok(k) => k,
-        Err(e) => {
+        let nonce_slice = selected_key.nonce;
+        let mut nonce_array = [0u8; 12];
+        if nonce_slice.len() == 12 {
+            nonce_array.copy_from_slice(&nonce_slice);
+        } else {
             return Ok(ok(TestModelResult {
                 success: false,
-                message: "API Key 解密失败".into(),
+                message: "Nonce 格式错误".into(),
                 response_text: None,
                 duration_ms: None,
-                error: Some(e.to_string()),
+                error: Some("invalid nonce length".into()),
             }));
+        }
+
+        match decrypt_api_key(&selected_key.encrypted_key, &nonce_array) {
+            Ok(k) => k,
+            Err(e) => {
+                return Ok(ok(TestModelResult {
+                    success: false,
+                    message: "API Key 解密失败".into(),
+                    response_text: None,
+                    duration_ms: None,
+                    error: Some(e.to_string()),
+                }));
+            }
         }
     };
 
@@ -1758,6 +1905,9 @@ async fn test_model(
         _ => {
             req_builder = req_builder.bearer_auth(&api_key);
         }
+    }
+    for (k, v) in &extra_codex_headers {
+        req_builder = req_builder.header(k.as_str(), v.as_str());
     }
 
     let resp = match req_builder.send().await {
@@ -2394,6 +2544,111 @@ async fn sync_last_status() -> Result<Json<ApiResponse<SyncLastStatus>>, Json<Ap
     }))
 }
 
+// --- Codex OAuth channel management ---
+
+#[derive(Deserialize)]
+struct CodexLoginStartBody {
+    provider_id: String,
+}
+
+#[derive(Serialize)]
+struct CodexLoginStartResult {
+    login_id: String,
+    authorize_url: String,
+}
+
+async fn codex_login_start(
+    axum::Json(body): axum::Json<CodexLoginStartBody>,
+) -> Result<Json<ApiResponse<CodexLoginStartResult>>, Json<ApiError>> {
+    let (login_id, authorize_url) = crate::codex::login::start_login(&body.provider_id)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(CodexLoginStartResult {
+        login_id,
+        authorize_url,
+    }))
+}
+
+async fn codex_login_status(
+    Path(login_id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, Json<ApiError>> {
+    match crate::codex::login::login_status(&login_id).await {
+        Some(status) => Ok(ok(serde_json::json!({ "result": status }))),
+        None => Err(err_json("登录会话不存在或已过期")),
+    }
+}
+
+async fn codex_login_cancel(Path(_login_id): Path<String>) -> Json<ApiResponse<()>> {
+    crate::codex::login::cancel_active("已手动取消登录").await;
+    ok(())
+}
+
+#[derive(Deserialize)]
+struct CodexImportLocalBody {
+    provider_id: String,
+}
+
+async fn codex_import_local(
+    axum::Json(body): axum::Json<CodexImportLocalBody>,
+) -> Result<Json<ApiResponse<crate::codex::store::CodexAccountSummary>>, Json<ApiError>> {
+    let summary = crate::codex::login::import_from_local_auth(&body.provider_id)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(summary))
+}
+
+async fn codex_account_refresh(
+    Path(provider_id): Path<String>,
+) -> Result<Json<ApiResponse<crate::codex::store::CodexAccountSummary>>, Json<ApiError>> {
+    let summary = crate::codex::store::force_refresh(&provider_id)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(summary))
+}
+
+#[derive(Deserialize)]
+struct CodexUsageQuery {
+    #[serde(default)]
+    force: Option<String>,
+}
+
+fn parse_force(q: &CodexUsageQuery) -> bool {
+    matches!(q.force.as_deref(), Some("1") | Some("true") | Some("yes"))
+}
+
+async fn codex_account_usage(
+    Path(provider_id): Path<String>,
+    Query(q): Query<CodexUsageQuery>,
+) -> Result<Json<ApiResponse<crate::codex::usage::CodexUsageSnapshot>>, Json<ApiError>> {
+    let pool = get_pool().await;
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT COALESCE(provider_kind, 'standard') FROM providers WHERE id = ?")
+            .bind(&provider_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| err_json(e.to_string()))?;
+    match kind.as_deref() {
+        None => return Err(err_json("供应商不存在")),
+        Some(k) if k != crate::codex::PROVIDER_KIND_CODEX => {
+            return Err(err_json("该供应商不是 Codex 官方渠道"));
+        }
+        _ => {}
+    }
+    let snap = crate::codex::usage::fetch_usage(&provider_id, parse_force(&q))
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(snap))
+}
+
+async fn codex_account_delete(
+    Path(provider_id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, Json<ApiError>> {
+    crate::codex::store::delete_by_provider(&provider_id)
+        .await
+        .map_err(|e| err_json(e.to_string()))?;
+    Ok(ok(()))
+}
+
 // --- Route registration ---
 
 pub fn api_routes() -> axum::Router {
@@ -2479,7 +2734,36 @@ pub fn api_routes() -> axum::Router {
             "/sync/versions/:filename",
             axum::routing::delete(delete_sync_version),
         )
-        .route("/sync/last", axum::routing::get(sync_last_status));
+        .route("/sync/last", axum::routing::get(sync_last_status))
+        // Codex OAuth channel management
+        .route(
+            "/codex/login/start",
+            axum::routing::post(codex_login_start),
+        )
+        .route(
+            "/codex/login/:login_id/status",
+            axum::routing::get(codex_login_status),
+        )
+        .route(
+            "/codex/login/:login_id/cancel",
+            axum::routing::post(codex_login_cancel),
+        )
+        .route(
+            "/codex/import-local",
+            axum::routing::post(codex_import_local),
+        )
+        .route(
+            "/codex/accounts/:provider_id/refresh",
+            axum::routing::post(codex_account_refresh),
+        )
+        .route(
+            "/codex/accounts/:provider_id/usage",
+            axum::routing::get(codex_account_usage),
+        )
+        .route(
+            "/codex/accounts/:provider_id",
+            axum::routing::delete(codex_account_delete),
+        );
 
     // Desktop mode: app launcher routes
     #[cfg(feature = "desktop")]

@@ -21,6 +21,14 @@
             <div class="provider-card-title">
               <span class="provider-card-name">{{ p.name }}</span>
               <n-tag
+                v-if="isCodexProvider(p)"
+                size="small"
+                type="success"
+                round
+              >
+                Codex 官方
+              </n-tag>
+              <n-tag
                 v-for="f in providerFormats(p)"
                 :key="f"
                 size="small"
@@ -34,6 +42,55 @@
           </div>
 
           <n-text depth="3" class="provider-card-url font-mono">{{ p.base_url }}</n-text>
+
+          <div v-if="isCodexProvider(p)" class="codex-account-chip">
+            <template v-if="p.codex_account && p.codex_account.status !== 'missing'">
+              <n-tag size="small" :bordered="false" :type="codexStatusType(p.codex_account.status)">
+                {{ codexStatusText(p.codex_account) }}
+              </n-tag>
+              <span class="codex-account-email">{{ p.codex_account.email || p.codex_account.chatgpt_account_id || '未知账号' }}</span>
+              <span v-if="p.codex_account.plan_type" class="codex-account-plan">{{ p.codex_account.plan_type }}</span>
+              <span v-if="p.codex_account.expires_at" class="codex-account-expiry">
+                令牌到期 {{ formatExpiry(p.codex_account.expires_at) }}
+              </span>
+            </template>
+            <template v-else>
+              <n-tag size="small" :bordered="false" type="warning">未登录</n-tag>
+              <span class="codex-account-email">尚未绑定 Codex 账号，请点击「登录」</span>
+            </template>
+          </div>
+
+          <div v-if="isCodexProvider(p) && p.codex_account?.status === 'active'" class="codex-usage">
+            <div v-if="usageLoading[p.id] && !usageByProvider[p.id]" class="codex-usage-loading">额度加载中…</div>
+            <n-text v-else-if="usageErrorByProvider[p.id]" depth="3" style="font-size: 12px">
+              {{ usageErrorByProvider[p.id] }}
+            </n-text>
+            <template v-else-if="usageByProvider[p.id]">
+              <n-text v-if="!usageByProvider[p.id]!.allowed" type="error" style="font-size: 12px">
+                账号当前不可用（额度拦截）
+              </n-text>
+              <div
+                v-for="w in usageByProvider[p.id]!.windows"
+                :key="w.limit_window_seconds"
+                class="codex-usage-row"
+              >
+                <div class="codex-usage-meta">
+                  <span>{{ w.label }}</span>
+                  <span>剩余 {{ formatPercent(w.remaining_percent) }}% · 已用 {{ formatPercent(w.used_percent) }}%</span>
+                </div>
+                <n-progress
+                  type="line"
+                  :percentage="Math.min(100, Math.max(0, Math.round(w.remaining_percent)))"
+                  :status="usageProgressStatus(usageByProvider[p.id]!, w)"
+                  :show-indicator="false"
+                  :height="6"
+                />
+                <n-text depth="3" style="font-size: 11px" :title="w.reset_at ? formatExpiry(w.reset_at) : undefined">
+                  {{ formatResetText(w) }}
+                </n-text>
+              </div>
+            </template>
+          </div>
 
           <div class="provider-card-models">
             <template v-if="p.models.length">
@@ -53,17 +110,54 @@
           </div>
 
           <div class="provider-card-actions">
+            <n-button
+              v-if="isCodexProvider(p)"
+              quaternary
+              size="tiny"
+              type="success"
+              @click="beginCodexLogin(p.id)"
+            >
+              {{ p.codex_account && p.codex_account.status !== 'missing' ? '重新登录' : '登录' }}
+            </n-button>
+            <n-button
+              v-if="isCodexProvider(p)"
+              quaternary
+              size="tiny"
+              :loading="importingLocal && loginProviderId === p.id"
+              @click="handleImportLocalForProvider(p.id)"
+            >
+              导入本机登录
+            </n-button>
+            <n-button
+              v-if="isCodexProvider(p)"
+              quaternary
+              size="tiny"
+              type="warning"
+              :loading="refreshingToken === p.id"
+              @click="handleRefreshCodexToken(p.id)"
+            >
+              刷新令牌
+            </n-button>
+            <n-button
+              v-if="isCodexProvider(p) && p.codex_account?.status === 'active'"
+              quaternary
+              size="tiny"
+              :loading="usageLoading[p.id]"
+              @click="fetchCodexUsage(p.id, true)"
+            >
+              刷新额度
+            </n-button>
             <n-button quaternary size="tiny" type="info" @click="openTestModal(p)">
               测试
             </n-button>
             <n-button quaternary size="tiny" type="primary" @click="openEditModal(p)">
               编辑
             </n-button>
-            <n-popconfirm @positive-click="handleDelete(p.id)">
+            <n-popconfirm @positive-click="handleDelete(p)">
               <template #trigger>
                 <n-button quaternary size="tiny" type="error">删除</n-button>
               </template>
-              确认删除此供应商？
+              {{ deleteConfirmText(p) }}
             </n-popconfirm>
           </div>
         </div>
@@ -83,6 +177,14 @@
       style="width: 680px"
     >
       <n-form :model="form" label-placement="left" label-width="80">
+        <n-form-item label="渠道类型" required>
+          <n-select
+            v-model:value="form.provider_kind"
+            :options="kindOptions"
+            :disabled="isEditing"
+            style="width: 260px"
+          />
+        </n-form-item>
         <n-form-item label="名称" required>
           <n-input v-model:value="form.name" placeholder="例如: opencode" :input-props="{ autocapitalize: 'off' }" />
           <template #feedback>
@@ -91,6 +193,33 @@
             </n-text>
           </template>
         </n-form-item>
+        <template v-if="isCodexForm">
+          <n-form-item label="账号">
+            <n-space vertical size="small" style="width: 100%">
+              <n-alert type="info" :bordered="false">
+                创建后将自动打开浏览器进行 ChatGPT 授权登录（与官方 Codex CLI 相同的 OAuth 流程）。
+                也可以使用下方「导入本机登录」直接读取本机 codex CLI 的登录凭证。
+              </n-alert>
+              <div v-if="isEditing && editingCodexAccount" class="codex-edit-account">
+                <n-tag size="small" :type="codexStatusType(editingCodexAccount.status)" :bordered="false">
+                  {{ codexStatusText(editingCodexAccount) }}
+                </n-tag>
+                <span>{{ editingCodexAccount.email || editingCodexAccount.chatgpt_account_id || '未知账号' }}</span>
+                <span v-if="editingCodexAccount.plan_type" class="codex-account-plan">{{ editingCodexAccount.plan_type }}</span>
+              </div>
+              <n-button
+                v-if="isEditing"
+                size="small"
+                type="success"
+                secondary
+                @click="beginCodexLogin(editingId)"
+              >
+                重新登录 / 更换账号
+              </n-button>
+            </n-space>
+          </n-form-item>
+        </template>
+        <template v-else>
         <n-form-item label="Base URL" required>
           <n-input v-model:value="form.base_url" placeholder="例如: https://api.openai.com（末尾含 /v1 也可以，自动去重）" :input-props="{ autocapitalize: 'off' }" />
         </n-form-item>
@@ -165,10 +294,16 @@
             :placeholder="isEditing ? '留空则不修改' : '输入 API Key'"
           />
         </n-form-item>
+        </template>
 
         <n-divider>模型列表</n-divider>
 
         <n-space vertical size="small">
+          <div v-if="isCodexForm" style="margin-bottom: 4px">
+            <n-button dashed size="small" @click="applyCodexPresetModels">
+              填入官方预设模型
+            </n-button>
+          </div>
           <div
             v-for="(_, index) in form.models"
             :key="index"
@@ -209,7 +344,7 @@
             <n-button dashed size="small" @click="addModel">
               + 添加模型
             </n-button>
-            <n-button dashed size="small" :loading="probing" @click="handleProbeModels">
+            <n-button v-if="!isCodexForm" dashed size="small" :loading="probing" @click="handleProbeModels">
               探测模型
             </n-button>
           </div>
@@ -342,14 +477,80 @@
         <n-empty v-else description="该供应商暂无模型" />
       </n-spin>
     </n-modal>
+
+    <n-modal
+      v-model:show="showLoginModal"
+      preset="card"
+      title="Codex 账号登录"
+      style="width: 520px"
+      :closable="loginStatusState !== 'pending'"
+      :mask-closable="loginStatusState !== 'pending'"
+    >
+      <n-space vertical size="large" align="center">
+        <template v-if="loginStatusState === 'pending'">
+          <n-spin size="large" />
+          <n-text>正在等待浏览器授权完成…</n-text>
+          <n-text depth="3" style="font-size: 12px; text-align: center">
+            若浏览器未自动打开，请点击下方链接手动完成登录：
+          </n-text>
+          <a :href="loginUrl" target="_blank" rel="noopener" class="codex-login-url">{{ loginUrl }}</a>
+        </template>
+        <template v-else-if="loginStatusState === 'completed'">
+          <n-result status="success" title="登录成功">
+            <template #default>
+              <n-text depth="3">
+                {{ loginAccount?.email || loginAccount?.chatgpt_account_id || '账号' }}
+                <span v-if="loginAccount?.plan_type">（{{ loginAccount.plan_type }}）</span>
+                已绑定到本渠道
+              </n-text>
+            </template>
+          </n-result>
+        </template>
+        <template v-else-if="loginStatusState === 'failed'">
+          <n-result status="error" title="登录失败">
+            <template #default>
+              <n-text type="error" style="word-break: break-all">{{ loginError }}</n-text>
+            </template>
+          </n-result>
+        </template>
+      </n-space>
+      <template #footer>
+        <div style="display: flex; justify-content: space-between; gap: 8px">
+          <n-button
+            size="small"
+            :loading="importingLocal"
+            :disabled="!loginProviderId"
+            @click="handleImportLocalLogin"
+          >
+            导入本机 ~/.codex 登录
+          </n-button>
+          <n-space size="small">
+            <n-button
+              v-if="loginStatusState === 'failed'"
+              size="small"
+              type="primary"
+              @click="beginCodexLogin(loginProviderId)"
+            >
+              重试
+            </n-button>
+            <n-button
+              size="small"
+              @click="cancelCodexLogin"
+            >
+              {{ loginStatusState === 'pending' ? '取消' : '关闭' }}
+            </n-button>
+          </n-space>
+        </div>
+      </template>
+    </n-modal>
   </n-space>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useMessage } from 'naive-ui'
 import { api } from '../api'
-import type { Provider, ModelCapabilities } from '../types'
+import type { Provider, ModelCapabilities, CodexAccountSummary, CodexUsageSnapshot, CodexUsageWindow } from '../types'
 
 interface TestResult {
   success: boolean
@@ -459,6 +660,8 @@ const form = ref({
   base_url: '',
   upstream_user_agent: '',
   api_key: '',
+  /** 'standard' = API-key channel; 'codex' = Codex official (ChatGPT OAuth). */
+  provider_kind: 'standard' as 'standard' | 'codex',
   protocols: [] as ProtocolFormItem[],
   models: [] as Array<{
     id?: string
@@ -472,6 +675,302 @@ const form = ref({
 /** Key echoed back from the server when the edit modal opens; the update
  * payload only carries `api_key` when the user actually changed it. */
 const originalApiKey = ref('')
+
+const kindOptions = [
+  { label: '标准（API Key）', value: 'standard' },
+  { label: 'Codex 官方（ChatGPT 登录）', value: 'codex' },
+]
+
+const isCodexForm = computed(() => form.value.provider_kind === 'codex')
+
+function isCodexProvider(p: Provider): boolean {
+  return p.provider_kind === 'codex_oauth'
+}
+
+const editingCodexAccount = computed<CodexAccountSummary | null>(() => {
+  if (!isEditing.value) return null
+  return providers.value.find((p) => p.id === editingId.value)?.codex_account ?? null
+})
+
+/** Official Codex model slugs (matches the backend seed list / current Codex picker). */
+const CODEX_PRESET_MODELS = [
+  'gpt-6.1-sol',
+  'gpt-6-astra',
+  'gpt-6.1-terra',
+  'gpt-6-sol',
+  'gpt-6-luna',
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+]
+
+function applyCodexPresetModels() {
+  const existing = new Set(form.value.models.map((m) => m.model_name))
+  const additions = CODEX_PRESET_MODELS.filter((m) => !existing.has(m)).map((m) => ({
+    model_name: m,
+    context_window: null,
+    capabilities: defaultCapabilities(),
+  }))
+  if (!additions.length) {
+    message.info('预设模型均已存在')
+    return
+  }
+  form.value.models = [...form.value.models, ...additions]
+}
+
+function codexStatusType(status: string): 'success' | 'error' | 'warning' {
+  if (status === 'active') return 'success'
+  if (status === 'expired') return 'error'
+  return 'warning'
+}
+
+function codexStatusText(account: CodexAccountSummary): string {
+  if (account.status === 'active') return '正常'
+  if (account.status === 'expired') return '已过期'
+  return '未登录'
+}
+
+function formatExpiry(rfc3339: string): string {
+  const d = new Date(rfc3339)
+  return Number.isNaN(d.getTime()) ? rfc3339 : d.toLocaleString()
+}
+
+// ---- Codex usage quota ----
+const usageByProvider = ref<Record<string, CodexUsageSnapshot | undefined>>({})
+const usageErrorByProvider = ref<Record<string, string>>({})
+const usageLoading = ref<Record<string, boolean>>({})
+
+function formatPercent(v: number): string {
+  return Number.isInteger(v) ? String(v) : v.toFixed(1)
+}
+
+function formatResetAfter(seconds: number | null | undefined): string {
+  if (seconds == null || seconds < 0) return ''
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (h > 0) return `约 ${h} 小时 ${m} 分钟后刷新`
+  if (m > 0) return `约 ${m} 分钟后刷新`
+  return `约 ${seconds} 秒后刷新`
+}
+
+function formatResetText(w: CodexUsageWindow): string {
+  if (w.reset_after_seconds != null && w.reset_after_seconds >= 0) {
+    return formatResetAfter(w.reset_after_seconds)
+  }
+  return w.reset_at ? `刷新时间 ${formatExpiry(w.reset_at)}` : ''
+}
+
+function usageProgressStatus(
+  snap: CodexUsageSnapshot,
+  w: CodexUsageWindow,
+): 'success' | 'warning' | 'error' {
+  if (!snap.allowed) return 'error'
+  if (snap.limit_reached || w.remaining_percent <= 10) return 'warning'
+  return 'success'
+}
+
+async function fetchCodexUsage(providerId: string, force = false) {
+  usageLoading.value = { ...usageLoading.value, [providerId]: true }
+  try {
+    const q = force ? '?force=1' : ''
+    const snap = await api<CodexUsageSnapshot>(`/api/codex/accounts/${providerId}/usage${q}`)
+    usageByProvider.value = { ...usageByProvider.value, [providerId]: snap }
+    usageErrorByProvider.value = { ...usageErrorByProvider.value, [providerId]: '' }
+  } catch (e) {
+    usageErrorByProvider.value = {
+      ...usageErrorByProvider.value,
+      [providerId]: e instanceof Error ? e.message : String(e),
+    }
+  } finally {
+    usageLoading.value = { ...usageLoading.value, [providerId]: false }
+  }
+}
+
+async function fetchAllCodexUsage() {
+  const ids = providers.value
+    .filter((p) => isCodexProvider(p) && p.codex_account?.status === 'active')
+    .map((p) => p.id)
+  await Promise.all(ids.map((id) => fetchCodexUsage(id, false)))
+}
+
+// ---- Codex OAuth login flow ----
+const showLoginModal = ref(false)
+const loginStatusState = ref<'idle' | 'pending' | 'completed' | 'failed'>('idle')
+const loginError = ref('')
+const loginUrl = ref('')
+const loginId = ref('')
+const loginAccount = ref<CodexAccountSummary | null>(null)
+const loginProviderId = ref('')
+const importingLocal = ref(false)
+const refreshingToken = ref('')
+let loginPollTimer: ReturnType<typeof setInterval> | null = null
+
+function stopLoginPolling() {
+  if (loginPollTimer !== null) {
+    clearInterval(loginPollTimer)
+    loginPollTimer = null
+  }
+}
+
+onBeforeUnmount(stopLoginPolling)
+
+function scheduleCloseLoginModal() {
+  window.setTimeout(() => {
+    if (loginStatusState.value === 'completed') {
+      showLoginModal.value = false
+      loginStatusState.value = 'idle'
+    }
+  }, 1200)
+}
+
+async function markLoginCompleted(account: CodexAccountSummary) {
+  loginAccount.value = account
+  loginStatusState.value = 'completed'
+  stopLoginPolling()
+  await fetchProviders()
+  scheduleCloseLoginModal()
+}
+
+/** If the login session vanished mid-poll, the callback may already have
+ * persisted tokens — recover UI state from the provider list. */
+async function recoverLoginFromProvider(): Promise<boolean> {
+  await fetchProviders()
+  const p = providers.value.find((x) => x.id === loginProviderId.value)
+  const account = p?.codex_account
+  if (account && account.status === 'active') {
+    await markLoginCompleted(account)
+    return true
+  }
+  return false
+}
+
+function accountFromStatusPayload(s: Record<string, unknown>): CodexAccountSummary | null {
+  if (s.status === 'completed') {
+    const nested = s.account
+    if (nested && typeof nested === 'object') {
+      return nested as CodexAccountSummary
+    }
+    // Older builds flattened the summary (and overwrote status with "active").
+    return s as unknown as CodexAccountSummary
+  }
+  // Flattened payload where account.status overwrote the login tag.
+  if (
+    s.status === 'active' &&
+    (s.email || s.chatgpt_account_id || s.provider_id)
+  ) {
+    return s as unknown as CodexAccountSummary
+  }
+  return null
+}
+
+/** Kick off (or restart) the browser OAuth flow for a provider and poll the
+ * backend login session until it completes/fails. */
+async function beginCodexLogin(providerId: string) {
+  loginProviderId.value = providerId
+  loginStatusState.value = 'pending'
+  loginError.value = ''
+  loginAccount.value = null
+  loginId.value = ''
+  showLoginModal.value = true
+  stopLoginPolling()
+  try {
+    const r = await api<{ login_id: string; authorize_url: string }>('/api/codex/login/start', {
+      method: 'POST',
+      body: JSON.stringify({ provider_id: providerId }),
+    })
+    loginUrl.value = r.authorize_url
+    loginId.value = r.login_id
+    loginPollTimer = setInterval(async () => {
+      try {
+        const status = await api<{ result: Record<string, unknown> }>(
+          `/api/codex/login/${r.login_id}/status`,
+        )
+        const s = status.result
+        const account = accountFromStatusPayload(s)
+        if (account) {
+          await markLoginCompleted(account)
+        } else if (s.status === 'failed') {
+          loginError.value = String(s.error || '未知错误')
+          loginStatusState.value = 'failed'
+          stopLoginPolling()
+        }
+      } catch (err) {
+        // Session removed after callback: recover from persisted account, else fail.
+        if (await recoverLoginFromProvider()) return
+        loginError.value = err instanceof Error ? err.message : String(err)
+        loginStatusState.value = 'failed'
+        stopLoginPolling()
+      }
+    }, 1500)
+  } catch (err) {
+    loginError.value = err instanceof Error ? err.message : String(err)
+    loginStatusState.value = 'failed'
+  }
+}
+
+function cancelCodexLogin() {
+  stopLoginPolling()
+  if (loginStatusState.value === 'pending' && loginId.value) {
+    void api(`/api/codex/login/${loginId.value}/cancel`, { method: 'POST' }).catch(() => {})
+  }
+  showLoginModal.value = false
+  loginStatusState.value = 'idle'
+  loginId.value = ''
+}
+
+/** Import credentials from the local official codex CLI (~/.codex/auth.json). */
+async function handleImportLocalLogin() {
+  if (!loginProviderId.value) return
+  // Import is an alternative to browser OAuth — cancel any in-flight session
+  // so we are not left polling a doomed callback while tokens are already saved.
+  stopLoginPolling()
+  if (loginId.value) {
+    void api(`/api/codex/login/${loginId.value}/cancel`, { method: 'POST' }).catch(() => {})
+    loginId.value = ''
+  }
+  importingLocal.value = true
+  try {
+    const account = await api<CodexAccountSummary>('/api/codex/import-local', {
+      method: 'POST',
+      body: JSON.stringify({ provider_id: loginProviderId.value }),
+    })
+    if (showLoginModal.value) {
+      await markLoginCompleted(account)
+    } else {
+      await fetchProviders()
+    }
+    message.success(`已导入本机 Codex 登录${account.email ? `（${account.email}）` : ''}`)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (showLoginModal.value) {
+      loginError.value = msg
+      loginStatusState.value = 'failed'
+    } else {
+      message.error(`导入失败: ${msg}`)
+    }
+  } finally {
+    importingLocal.value = false
+  }
+}
+
+/** Card-level import: no need to open the browser-OAuth modal first. */
+async function handleImportLocalForProvider(providerId: string) {
+  loginProviderId.value = providerId
+  await handleImportLocalLogin()
+}
+
+async function handleRefreshCodexToken(providerId: string) {
+  refreshingToken.value = providerId
+  try {
+    await api(`/api/codex/accounts/${providerId}/refresh`, { method: 'POST' })
+    message.success('令牌已刷新')
+    await fetchProviders()
+  } catch (err) {
+    message.error(`刷新失败: ${err}`)
+  } finally {
+    refreshingToken.value = ''
+  }
+}
 
 const formatOptions = [
   { label: 'OpenAI Completions', value: 'completions' },
@@ -562,6 +1061,7 @@ function openCreateModal() {
     base_url: '',
     upstream_user_agent: '',
     api_key: '',
+    provider_kind: 'standard',
     protocols: [{ format: 'completions', base_url: '', endpoint_path: '', is_primary: true }],
     models: [],
   }
@@ -592,6 +1092,7 @@ function openEditModal(row: Provider) {
     base_url: row.base_url,
     upstream_user_agent: row.upstream_user_agent || '',
     api_key: '',
+    provider_kind: row.provider_kind === 'codex_oauth' ? 'codex' : 'standard',
     protocols,
     models: row.models.map((m) => ({
       id: m.id,
@@ -684,6 +1185,10 @@ async function handleTestModel(modelName: string) {
  * id. Edit mode with a blank key field falls back to the stored key
  * server-side. */
 async function handleProbeModels() {
+  if (isCodexForm.value) {
+    message.info('Codex 官方渠道不支持探测模型，请使用「填入官方预设模型」或手动维护')
+    return
+  }
   if (!form.value.base_url.trim()) {
     message.error('请先填写 Base URL')
     return
@@ -703,6 +1208,7 @@ async function handleProbeModels() {
             endpoint_path: proto.endpoint_path?.trim() || null,
             api_key: form.value.api_key?.trim() || null,
             upstream_user_agent: form.value.upstream_user_agent?.trim() || null,
+            provider_kind: form.value.provider_kind === 'codex' ? form.value.provider_kind : null,
           }),
         })
         if (!result.success) {
@@ -750,7 +1256,7 @@ function confirmProbeImport() {
 }
 
 async function handleSubmit() {
-  if (!form.value.name || !form.value.base_url) {
+  if (!form.value.name) {
     message.warning('请填写必填字段')
     return false
   }
@@ -766,6 +1272,60 @@ async function handleSubmit() {
     message.error(`供应商名称 '${form.value.name}' 已存在`)
     return false
   }
+  if (!form.value.models.length || form.value.models.some((m) => !m.model_name.trim())) {
+    message.warning('请至少配置一个模型名称')
+    return false
+  }
+
+  const modelsPayload = form.value.models.map((m) => ({
+    id: m.id,
+    model_name: m.model_name,
+    target_model: m.target_model ?? null,
+    context_window: m.context_window,
+    capabilities: m.capabilities,
+  }))
+
+  // ---- Codex official channel: fixed contract, no API key, no protocols. ----
+  if (isCodexForm.value) {
+    modalLoading.value = true
+    try {
+      if (isEditing.value) {
+        await api(`/api/providers/${editingId.value}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            name: form.value.name,
+            provider_kind: 'codex_oauth',
+            models: modelsPayload,
+          }),
+        })
+        message.success('Codex 渠道更新成功')
+        showModal.value = false
+        await fetchProviders()
+      } else {
+        const newId = await api<string>('/api/providers', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: form.value.name,
+            base_url: '',
+            format: 'responses',
+            provider_kind: 'codex',
+            api_key: '',
+            models: modelsPayload.map(({ id: _id, ...rest }) => rest),
+          }),
+        })
+        message.success('Codex 渠道已创建，开始登录…')
+        showModal.value = false
+        await fetchProviders()
+        beginCodexLogin(newId)
+      }
+    } catch (err) {
+      message.error(`${isEditing.value ? '更新' : '创建'}失败: ${err}`)
+    } finally {
+      modalLoading.value = false
+    }
+    return false
+  }
+
   if (!isEditing.value && !form.value.api_key) {
     message.warning('请输入 API Key')
     return false
@@ -805,13 +1365,7 @@ async function handleSubmit() {
         endpoint_path: primary.endpoint_path.trim() || null,
         upstream_user_agent: form.value.upstream_user_agent || '',
         protocols: protocolsPayload,
-        models: form.value.models.map((m) => ({
-          id: m.id,
-          model_name: m.model_name,
-          target_model: m.target_model ?? null,
-          context_window: m.context_window,
-          capabilities: m.capabilities,
-        })),
+        models: modelsPayload,
       }
       if (form.value.api_key && form.value.api_key !== originalApiKey.value) {
         body.api_key = form.value.api_key
@@ -832,11 +1386,7 @@ async function handleSubmit() {
           upstream_user_agent: form.value.upstream_user_agent || '',
           api_key: form.value.api_key,
           protocols: protocolsPayload,
-          models: form.value.models.map((m) => ({
-            model_name: m.model_name,
-            target_model: null,
-            capabilities: m.capabilities,
-          })),
+          models: modelsPayload.map(({ id: _id, ...rest }) => rest),
         }),
       })
       message.success('供应商创建成功')
@@ -861,9 +1411,16 @@ async function handleToggle(id: string, enabled: boolean) {
   }
 }
 
-async function handleDelete(id: string) {
+function deleteConfirmText(p: Provider): string {
+  if (isCodexProvider(p)) {
+    return '确认删除此 Codex 渠道？已登录的账号凭证将一并移除。'
+  }
+  return '确认删除此供应商？'
+}
+
+async function handleDelete(p: Provider) {
   try {
-    await api(`/api/providers/${id}`, { method: 'DELETE' })
+    await api(`/api/providers/${p.id}`, { method: 'DELETE' })
     message.success('供应商已删除')
     await fetchProviders()
   } catch (err) {
@@ -875,6 +1432,7 @@ async function fetchProviders() {
   loading.value = true
   try {
     providers.value = await api<Provider[]>('/api/providers')
+    void fetchAllCodexUsage()
   } catch (err) {
     console.error('Failed to load providers:', err)
   } finally {
@@ -988,6 +1546,80 @@ onMounted(fetchProviders)
   padding-top: 4px;
   border-top: 1px solid var(--border);
   margin-top: auto;
+}
+
+/* Codex usage quota block on provider cards */
+.codex-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.codex-usage-loading {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.codex-usage-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.codex-usage-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+/* Codex account chip on provider cards */
+.codex-account-chip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.codex-account-email {
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.codex-account-plan {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+}
+
+.codex-account-expiry {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.codex-edit-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.codex-login-url {
+  font-size: 12px;
+  word-break: break-all;
+  color: var(--accent, #4b9eff);
 }
 
 .protocol-list {

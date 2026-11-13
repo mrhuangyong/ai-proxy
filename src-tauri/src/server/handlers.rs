@@ -682,11 +682,59 @@ pub(crate) async fn handle_proxy_inner(
         }
     }
 
-    let selected_key =
-        match KeyRotation::get_next_key(&route.provider_id, &RotationStrategy::LeastUsed).await {
-            Ok(k) => k,
-            Err(e) => {
-                let err_msg = format!("key rotation error: {}", e);
+    // Codex OAuth providers keep no static `api_keys` rows — their bearer is
+    // the refreshed OAuth token resolved further below. Skip key rotation
+    // entirely for them.
+    let api_key: String =
+        if route.provider_kind == crate::codex::PROVIDER_KIND_CODEX {
+            tracing::info!(
+                "[codex] provider {} uses OAuth credentials; skipping static key rotation",
+                route.provider_id
+            );
+            String::new()
+        } else {
+            let selected_key =
+                match KeyRotation::get_next_key(&route.provider_id, &RotationStrategy::LeastUsed)
+                    .await
+                {
+                    Ok(k) => k,
+                    Err(e) => {
+                        let err_msg = format!("key rotation error: {}", e);
+                        if let Err(le) = log_request_entry(
+                            &request_id,
+                            &client_format,
+                            &route.provider_name,
+                            &route.target_format,
+                            &client_model,
+                            &route.target_model,
+                            ir_request.stream,
+                            500,
+                            start.elapsed().as_millis() as i64,
+                            Some(&err_msg),
+                            0,
+                            0,
+                            0,
+                            None,
+                            None,
+                            None,
+                            0,
+                            None,
+                            client_user_agent.as_deref(),
+                            false,
+                        )
+                        .await
+                        {
+                            tracing::error!("Early error logging failed: {}", le);
+                        }
+                        return e.into_response();
+                    }
+                };
+
+            let nonce_slice: Vec<u8> = selected_key.nonce;
+            let mut nonce_array = [0u8; 12];
+            if nonce_slice.len() == 12 {
+                nonce_array.copy_from_slice(&nonce_slice);
+            } else {
                 if let Err(le) = log_request_entry(
                     &request_id,
                     &client_format,
@@ -697,7 +745,7 @@ pub(crate) async fn handle_proxy_inner(
                     ir_request.stream,
                     500,
                     start.elapsed().as_millis() as i64,
-                    Some(&err_msg),
+                    Some("invalid nonce length"),
                     0,
                     0,
                     0,
@@ -713,48 +761,66 @@ pub(crate) async fn handle_proxy_inner(
                 {
                     tracing::error!("Early error logging failed: {}", le);
                 }
-                return e.into_response();
+                return ProxyError::KeyManagement("invalid nonce length".into()).into_response();
+            }
+
+            match decrypt_api_key(&selected_key.encrypted_key, &nonce_array) {
+                Ok(k) => k,
+                Err(e) => {
+                    let err_msg = format!("key decryption error: {}", e);
+                    if let Err(le) = log_request_entry(
+                        &request_id,
+                        &client_format,
+                        &route.provider_name,
+                        &route.target_format,
+                        &client_model,
+                        &route.target_model,
+                        ir_request.stream,
+                        500,
+                        start.elapsed().as_millis() as i64,
+                        Some(&err_msg),
+                        0,
+                        0,
+                        0,
+                        None,
+                        None,
+                        None,
+                        0,
+                        None,
+                        client_user_agent.as_deref(),
+                        false,
+                    )
+                    .await
+                    {
+                        tracing::error!("Early error logging failed: {}", le);
+                    }
+                    return e.into_response();
+                }
             }
         };
 
-    let nonce_slice: Vec<u8> = selected_key.nonce;
-    let mut nonce_array = [0u8; 12];
-    if nonce_slice.len() == 12 {
-        nonce_array.copy_from_slice(&nonce_slice);
-    } else {
-        if let Err(le) = log_request_entry(
-            &request_id,
-            &client_format,
-            &route.provider_name,
-            &route.target_format,
-            &client_model,
-            &route.target_model,
-            ir_request.stream,
-            500,
-            start.elapsed().as_millis() as i64,
-            Some("invalid nonce length"),
-            0,
-            0,
-            0,
-            None,
-            None,
-            None,
-            0,
-            None,
-            client_user_agent.as_deref(),
-            false,
-        )
-        .await
-        {
-            tracing::error!("Early error logging failed: {}", le);
+    // Inject custom upstream User-Agent (provider override > global > passthrough client UA).
+    {
+        let global_ua = get_setting("upstream_user_agent").await.unwrap_or_default();
+        let final_ua: &str = if !route.upstream_user_agent.is_empty() {
+            &route.upstream_user_agent
+        } else if !global_ua.is_empty() {
+            &global_ua
+        } else {
+            ""
+        };
+        if !final_ua.is_empty() {
+            extra_headers.insert("user-agent".to_string(), final_ua.to_string());
         }
-        return ProxyError::KeyManagement("invalid nonce length".into()).into_response();
     }
 
-    let api_key = match decrypt_api_key(&selected_key.encrypted_key, &nonce_array) {
-        Ok(k) => k,
+    // Codex OAuth channel: swap the (unused) static key for the refreshed
+    // bearer token and inject the ChatGPT account headers into extra_headers
+    // before either the passthrough or the conversion path runs.
+    let codex_bearer = match crate::codex::resolve_outbound_auth(&route, &mut extra_headers).await {
+        Ok(v) => v,
         Err(e) => {
-            let err_msg = format!("key decryption error: {}", e);
+            let err_msg = format!("codex auth error: {}", e);
             if let Err(le) = log_request_entry(
                 &request_id,
                 &client_format,
@@ -785,21 +851,6 @@ pub(crate) async fn handle_proxy_inner(
         }
     };
 
-    // Inject custom upstream User-Agent (provider override > global > passthrough client UA).
-    {
-        let global_ua = get_setting("upstream_user_agent").await.unwrap_or_default();
-        let final_ua: &str = if !route.upstream_user_agent.is_empty() {
-            &route.upstream_user_agent
-        } else if !global_ua.is_empty() {
-            &global_ua
-        } else {
-            ""
-        };
-        if !final_ua.is_empty() {
-            extra_headers.insert("user-agent".to_string(), final_ua.to_string());
-        }
-    }
-
     // Passthrough fast-path: when the provider speaks the client's protocol,
     // forward the original body as-is instead of converting through the IR.
     // Skipped when body-level interceptor rules fired (their effects only
@@ -821,7 +872,12 @@ pub(crate) async fn handle_proxy_inner(
                     stream: ir_request.stream,
                     client_model: client_model.clone(),
                     extra_headers: extra_headers.clone(),
-                    api_key: api_key.clone(),
+                    // Codex providers carry the refreshed OAuth token here;
+                    // passthrough falls back to it because their api_keys
+                    // pool is empty by design.
+                    api_key: codex_bearer
+                        .clone()
+                        .unwrap_or_else(|| api_key.clone()),
                     endpoint_override: endpoint_override.map(String::from),
                     failover_ctx: failover_ctx.clone(),
                     request_id: request_id.clone(),
@@ -999,23 +1055,28 @@ pub(crate) async fn handle_proxy_inner(
 
     // Decrypt all available keys for rotation
     let mut decrypted_keys: Vec<String> = Vec::new();
-    let all_keys = crate::key::store::list_active_keys(&route.provider_id)
-        .await
-        .unwrap_or_default();
-    for k in all_keys {
-        // SelectedKey.nonce is Vec<u8>; decrypt_api_key expects &[u8; 12].
-        if k.nonce.len() != 12 {
-            continue;
+    if let Some(token) = &codex_bearer {
+        // Codex OAuth channel: exactly one credential — the refreshed token.
+        decrypted_keys.push(token.clone());
+    } else {
+        let all_keys = crate::key::store::list_active_keys(&route.provider_id)
+            .await
+            .unwrap_or_default();
+        for k in all_keys {
+            // SelectedKey.nonce is Vec<u8>; decrypt_api_key expects &[u8; 12].
+            if k.nonce.len() != 12 {
+                continue;
+            }
+            let mut nonce_arr = [0u8; 12];
+            nonce_arr.copy_from_slice(&k.nonce);
+            if let Ok(d) = decrypt_api_key(&k.encrypted_key, &nonce_arr) {
+                decrypted_keys.push(d);
+            }
         }
-        let mut nonce_arr = [0u8; 12];
-        nonce_arr.copy_from_slice(&k.nonce);
-        if let Ok(d) = decrypt_api_key(&k.encrypted_key, &nonce_arr) {
-            decrypted_keys.push(d);
+        if decrypted_keys.is_empty() {
+            // fallback: legacy single-key path (uses the already-resolved selected_key)
+            decrypted_keys.push(api_key.clone());
         }
-    }
-    if decrypted_keys.is_empty() {
-        // fallback: legacy single-key path (uses the already-resolved selected_key)
-        decrypted_keys.push(api_key.clone());
     }
 
     let factory = move |key: &str| {

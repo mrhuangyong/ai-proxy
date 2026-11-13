@@ -2,6 +2,7 @@ use crate::mcp;
 use crate::server::api;
 use crate::server::handlers;
 use crate::server::handlers_failover;
+use crate::server::images;
 use crate::server::middleware::auth_middleware;
 use crate::skill;
 use axum::middleware;
@@ -50,6 +51,9 @@ pub fn create_router() -> Router {
             post(handlers::handle_anthropic_count_tokens),
         )
         .route("/v1beta/models/:model", post(handlers::handle_gemini))
+        // gpt-image relay (Codex ChatGPT backend Images API)
+        .route("/v1/images/generations", post(images::handle_image_generation))
+        .route("/v1/images/edits", post(images::handle_image_edit))
         .layer(middleware::from_fn(auth_middleware));
 
     // Failover group: virtual model routing with sticky-failover.

@@ -33,6 +33,9 @@ pub struct BackupData {
     pub provider_models: Vec<serde_json::Value>,
     #[serde(default)]
     pub api_keys: Vec<serde_json::Value>,
+    /// Codex OAuth credentials (migration 031); absent in pre-031 backups.
+    #[serde(default)]
+    pub codex_accounts: Vec<serde_json::Value>,
     #[serde(default)]
     pub interceptor_rules: Vec<serde_json::Value>,
     #[serde(default)]
