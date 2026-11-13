@@ -10,6 +10,7 @@
 pub mod jwt;
 pub mod login;
 pub mod oauth;
+pub mod refresh_scheduler;
 pub mod store;
 pub mod usage;
 

@@ -48,6 +48,8 @@ pub async fn start_server(
 
     // Start the virtual-model health checker (no-op when no virtual models exist).
     crate::virtual_model::health::spawn_health_checker();
+    // Proactively refresh Codex OAuth tokens before they expire.
+    crate::codex::refresh_scheduler::spawn_token_refresh_scheduler();
 
     let addr = SocketAddr::new(
         host.parse()
@@ -89,6 +91,7 @@ pub async fn start_server_with_static(
 
     // Start the virtual-model health checker (no-op when no virtual models exist).
     crate::virtual_model::health::spawn_health_checker();
+    crate::codex::refresh_scheduler::spawn_token_refresh_scheduler();
 
     if let Some(dir) = static_dir.filter(|s| !s.is_empty()) {
         let serve_dir =
